@@ -57,8 +57,15 @@ class MainWindow(QMainWindow):
         self.speed_input.setSuffix(" km/h")
         self.speed_input.setDecimals(1)
 
+        self.jitter_input = QDoubleSpinBox()
+        self.jitter_input.setRange(0.0, 50.0)
+        self.jitter_input.setValue(5.0)
+        self.jitter_input.setSuffix(" m")
+        self.jitter_input.setDecimals(1)
+
         self.device_label = QLabel("Device: dry-run / no bridge configured")
         self.points_label = QLabel("Points: 0")
+        self.current_label = QLabel("Current: -")
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
@@ -101,7 +108,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.bridge_combo)
         layout.addWidget(QLabel("Speed"))
         layout.addWidget(self.speed_input)
+        layout.addWidget(QLabel("GPS jitter"))
+        layout.addWidget(self.jitter_input)
         layout.addWidget(self.points_label)
+        layout.addWidget(self.current_label)
         layout.addWidget(self.device_label)
 
         buttons = QHBoxLayout()
@@ -122,12 +132,14 @@ class MainWindow(QMainWindow):
         else:
             self._points.append(point)
         self.points_label.setText(f"Points: {len(self._points)}")
+        self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
         self.map_view.set_points(self._points)
         self._log(f"Added point: {point.lat:.6f}, {point.lon:.6f}")
 
     def _clear_points(self) -> None:
         self._points.clear()
         self.points_label.setText("Points: 0")
+        self.current_label.setText("Current: -")
         self.map_view.clear_points()
         self._log("Cleared points.")
 
@@ -147,7 +159,8 @@ class MainWindow(QMainWindow):
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = self._output_dir / f"simulation_{timestamp}.gpx"
-        write_gpx(path, points, speed_kmh=float(self.speed_input.value()))
+        jitter_meters = float(self.jitter_input.value()) if self.mode_combo.currentText() == "Route" else 0.0
+        write_gpx(path, points, speed_kmh=float(self.speed_input.value()), jitter_meters=jitter_meters)
 
         if self.bridge_combo.currentText() == "iPhone" and self.mode_combo.currentText() == "Single point":
             point = points[0]
@@ -159,12 +172,16 @@ class MainWindow(QMainWindow):
         if result.detail:
             self._log(f"Detail: {result.detail}")
         self._log(f"GPX: {path}")
+        self.current_label.setText(f"Current: {points[0].lat:.6f}, {points[0].lon:.6f}")
+        if jitter_meters > 0:
+            self._log(f"Route GPS jitter: up to {jitter_meters:.1f} m")
 
     def _stop(self) -> None:
         result = self._bridge.stop_location()
         self._log(result.message)
         if result.detail:
             self._log(f"Detail: {result.detail}")
+        self.current_label.setText("Current: stopped")
 
     def _refresh_devices(self) -> None:
         devices = self._bridge.list_devices()
@@ -199,6 +216,8 @@ class MainWindow(QMainWindow):
         if value == "Single point" and len(self._points) > 1:
             self._points = self._points[-1:]
             self.points_label.setText(f"Points: {len(self._points)}")
+            point = self._points[0]
+            self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
             self.map_view.set_points(self._points)
             self._log("Single point mode keeps only the latest point.")
 

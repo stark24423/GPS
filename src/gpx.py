@@ -6,7 +6,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
 from src.models import Coordinate
-from src.route import build_timed_route
+from src.route import apply_route_jitter, build_timed_route
 
 
 def _format_time(value: datetime) -> str:
@@ -20,8 +20,14 @@ def _prettify_xml(root: Element) -> str:
     return minidom.parseString(rough).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
 
 
-def generate_gpx(points: list[Coordinate], speed_kmh: float = 5.0, name: str = "GPS Simulation") -> str:
+def generate_gpx(
+    points: list[Coordinate],
+    speed_kmh: float = 5.0,
+    name: str = "GPS Simulation",
+    jitter_meters: float = 0.0,
+) -> str:
     timed_points = build_timed_route(points, speed_kmh=speed_kmh)
+    timed_points = apply_route_jitter(timed_points, radius_meters=jitter_meters)
 
     root = Element(
         "gpx",
@@ -54,8 +60,13 @@ def generate_gpx(points: list[Coordinate], speed_kmh: float = 5.0, name: str = "
     return _prettify_xml(root)
 
 
-def write_gpx(path: str | Path, points: list[Coordinate], speed_kmh: float = 5.0) -> Path:
+def write_gpx(
+    path: str | Path,
+    points: list[Coordinate],
+    speed_kmh: float = 5.0,
+    jitter_meters: float = 0.0,
+) -> Path:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(generate_gpx(points, speed_kmh=speed_kmh), encoding="utf-8")
+    output_path.write_text(generate_gpx(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters), encoding="utf-8")
     return output_path

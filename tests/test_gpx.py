@@ -21,3 +21,17 @@ def test_generate_route_gpx_contains_track_points():
     assert "<trk>" in xml
     assert "<trkpt lat=\"25.03300000\" lon=\"121.56540000\">" in xml
     assert "25.03400000" in xml
+
+
+def test_generate_route_gpx_can_apply_jitter_without_moving_endpoints():
+    xml = generate_gpx(
+        [
+            Coordinate(25.033, 121.5654),
+            Coordinate(25.04, 121.57),
+        ],
+        speed_kmh=30,
+        jitter_meters=5,
+    )
+
+    assert "<trkpt lat=\"25.03300000\" lon=\"121.56540000\">" in xml
+    assert "25.04000000" in xml

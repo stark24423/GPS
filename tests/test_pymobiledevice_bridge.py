@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from unittest.mock import Mock, patch
 
 from src.bridge.pymobiledevice import PymobileDeviceBridge
@@ -25,3 +26,16 @@ def test_pymobiledevice_start_location_requires_existing_gpx():
 
     assert result.ok is False
     assert "does not exist" in result.message
+
+
+def test_pymobiledevice_stop_times_out_without_hanging():
+    bridge = PymobileDeviceBridge("pymobiledevice3")
+
+    with patch(
+        "src.bridge.pymobiledevice.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(["pymobiledevice3"], 8),
+    ):
+        result = bridge.stop_location()
+
+    assert result.ok is False
+    assert "timed out" in result.detail

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from datetime import datetime, timedelta, timezone
 
 from src.models import Coordinate
@@ -68,3 +69,35 @@ def build_timed_route(
             timed.append((point, current_time))
 
     return timed
+
+
+def jitter_coordinate(point: Coordinate, radius_meters: float, rng: random.Random | None = None) -> Coordinate:
+    if radius_meters <= 0:
+        return point
+
+    generator = rng or random.Random()
+    distance = generator.uniform(0, radius_meters)
+    bearing = generator.uniform(0, 2 * math.pi)
+    north_meters = math.cos(bearing) * distance
+    east_meters = math.sin(bearing) * distance
+
+    lat_offset = north_meters / 111_320
+    lon_scale = max(0.01, math.cos(math.radians(point.lat)))
+    lon_offset = east_meters / (111_320 * lon_scale)
+    return Coordinate(lat=point.lat + lat_offset, lon=point.lon + lon_offset, elevation=point.elevation)
+
+
+def apply_route_jitter(
+    timed_points: list[tuple[Coordinate, datetime]],
+    radius_meters: float,
+    seed: int | None = None,
+) -> list[tuple[Coordinate, datetime]]:
+    if radius_meters <= 0 or len(timed_points) < 3:
+        return timed_points
+
+    rng = random.Random(seed)
+    jittered: list[tuple[Coordinate, datetime]] = [timed_points[0]]
+    for point, timestamp in timed_points[1:-1]:
+        jittered.append((jitter_coordinate(point, radius_meters, rng), timestamp))
+    jittered.append(timed_points[-1])
+    return jittered

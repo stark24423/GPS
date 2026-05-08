@@ -56,13 +56,13 @@ class PymobileDeviceBridge(Bridge):
                 if self._active_process.stdin:
                     self._active_process.stdin.write("\n")
                     self._active_process.stdin.flush()
-                self._active_process.wait(timeout=5)
+                self._active_process.wait(timeout=1)
             except (OSError, subprocess.TimeoutExpired):
                 self._active_process.terminate()
             finally:
                 self._active_process = None
 
-        result = self._run(["developer", "dvt", "simulate-location", "clear"], timeout=30)
+        result = self._run(["developer", "dvt", "simulate-location", "clear"], timeout=8)
         return self._to_bridge_result(result, success_message="Cleared iPhone simulated location.")
 
     def check_requirements(self) -> list[RequirementStatus]:
@@ -89,13 +89,21 @@ class PymobileDeviceBridge(Bridge):
         return checks
 
     def _run(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [self.executable, *args],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=timeout,
-        )
+        try:
+            return subprocess.run(
+                [self.executable, *args],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(
+                [self.executable, *args],
+                124,
+                exc.stdout or "",
+                exc.stderr or f"Command timed out after {timeout} seconds.",
+            )
 
     def _start_interactive(self, args: list[str], success_message: str) -> BridgeResult:
         if self._active_process and self._active_process.poll() is None:
@@ -105,8 +113,8 @@ class PymobileDeviceBridge(Bridge):
             process = subprocess.Popen(
                 [self.executable, *args],
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
         except OSError as exc:
@@ -118,8 +126,7 @@ class PymobileDeviceBridge(Bridge):
             self._active_process = process
             return BridgeResult(ok=True, message=success_message, detail="Process is running.")
 
-        stdout, stderr = process.communicate(timeout=2)
-        output = f"{stdout}\n{stderr}".strip()
+        output = f"Command exited with return code {process.returncode}."
         return self._to_bridge_result(
             subprocess.CompletedProcess(args, process.returncode or 0, output, ""),
             success_message=success_message,
