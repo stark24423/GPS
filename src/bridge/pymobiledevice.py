@@ -113,16 +113,13 @@ class PymobileDeviceBridge(Bridge):
             return BridgeResult(ok=False, message="Failed to start pymobiledevice3.", detail=str(exc))
 
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=8)
         except subprocess.TimeoutExpired:
             self._active_process = process
             return BridgeResult(ok=True, message=success_message, detail="Process is running.")
 
-        output = ""
-        if process.stdout:
-            output += process.stdout.read()
-        if process.stderr:
-            output += process.stderr.read()
+        stdout, stderr = process.communicate(timeout=2)
+        output = f"{stdout}\n{stderr}".strip()
         return self._to_bridge_result(
             subprocess.CompletedProcess(args, process.returncode or 0, output, ""),
             success_message=success_message,
