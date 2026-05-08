@@ -25,7 +25,7 @@ from src.bridge import DryRunBridge, PymobileDeviceBridge
 from src.gpx import build_gpx_points, write_gpx
 from src.map_view import MapView
 from src.models import Coordinate
-from src.tunneld import start_tunneld_admin
+from src.tunneld import get_tunneld_pid, start_tunneld_admin, stop_tunneld_admin
 
 
 class MainWindow(QMainWindow):
@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self.points_label = QLabel("Points: 0")
         self.current_label = QLabel("Current: -")
         self.status_label = QLabel("Status: idle")
+        self.tunneld_label = QLabel("tunneld: unknown")
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.output_button = QPushButton("Open output folder")
         self.refresh_button = QPushButton("Refresh devices")
         self.tunneld_button = QPushButton("Start tunneld")
+        self.stop_tunneld_button = QPushButton("Stop tunneld")
         self.stop_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start)
@@ -87,6 +89,7 @@ class MainWindow(QMainWindow):
         self.output_button.clicked.connect(self._open_output_folder)
         self.refresh_button.clicked.connect(self._refresh_devices)
         self.tunneld_button.clicked.connect(self._start_tunneld)
+        self.stop_tunneld_button.clicked.connect(self._stop_tunneld)
 
         self.simulation_timer = QTimer(self)
         self.simulation_timer.setInterval(1000)
@@ -108,6 +111,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
         self._log("Application started in dry-run mode.")
+        self._refresh_tunneld_status()
         self._refresh_devices()
         self._log_requirements()
 
@@ -126,6 +130,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.points_label)
         layout.addWidget(self.current_label)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.tunneld_label)
         layout.addWidget(self.device_label)
 
         buttons = QHBoxLayout()
@@ -136,6 +141,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.clear_button)
         layout.addWidget(self.output_button)
         layout.addWidget(self.tunneld_button)
+        layout.addWidget(self.stop_tunneld_button)
         layout.addWidget(self.refresh_button)
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log, stretch=1)
@@ -254,6 +260,20 @@ class MainWindow(QMainWindow):
             self._log(f"Detail: {result.detail}")
         if not result.ok:
             QMessageBox.warning(self, "tunneld", result.message)
+        self._refresh_tunneld_status()
+
+    def _stop_tunneld(self) -> None:
+        result = stop_tunneld_admin(Path.cwd())
+        self._log(result.message)
+        if result.detail:
+            self._log(f"Detail: {result.detail}")
+        if not result.ok:
+            QMessageBox.warning(self, "tunneld", result.message)
+        self._refresh_tunneld_status()
+
+    def _refresh_tunneld_status(self) -> None:
+        pid = get_tunneld_pid(Path.cwd())
+        self.tunneld_label.setText(f"tunneld: background PID {pid}" if pid else "tunneld: not started by GUI")
 
     def _log_requirements(self) -> None:
         for requirement in self._bridge.check_requirements():
