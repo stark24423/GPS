@@ -46,7 +46,8 @@
   <div id="map"></div>
   <script>
     let pythonBridge = null;
-    const map = L.map('map').setView([25.0330, 121.5654], 13);
+    const defaultPosition = {lat: 24.7808548, lon: 121.0252718};
+    const map = L.map('map').setView([defaultPosition.lat, defaultPosition.lon], 17);
     const markers = [];
     let polyline = null;
     let currentMarker = null;
@@ -123,6 +124,8 @@
         pythonBridge.clearPoints();
       }
     };
+
+    window.setCurrentPosition(defaultPosition, 'Start');
   </script>
 </body>
 </html>
