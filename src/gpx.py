@@ -60,6 +60,12 @@ def generate_gpx(
     return _prettify_xml(root)
 
 
+def build_gpx_points(points: list[Coordinate], speed_kmh: float = 5.0, jitter_meters: float = 0.0) -> list[Coordinate]:
+    timed_points = build_timed_route(points, speed_kmh=speed_kmh)
+    timed_points = apply_route_jitter(timed_points, radius_meters=jitter_meters)
+    return [point for point, _timestamp in timed_points]
+
+
 def write_gpx(
     path: str | Path,
     points: list[Coordinate],

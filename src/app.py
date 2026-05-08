@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.bridge import DryRunBridge, PymobileDeviceBridge
-from src.gpx import write_gpx
+from src.gpx import build_gpx_points, write_gpx
 from src.map_view import MapView
 from src.models import Coordinate
 from src.tunneld import start_tunneld_admin
@@ -38,6 +38,8 @@ class MainWindow(QMainWindow):
         self._iphone_bridge = PymobileDeviceBridge(str(Path.cwd() / ".venv" / "Scripts" / "pymobiledevice3.exe"))
         self._bridge = self._dry_run_bridge
         self._output_dir = Path.cwd() / "output"
+        self._simulation_points: list[Coordinate] = []
+        self._simulation_index = 0
 
         self.map_view = MapView()
         self.map_view.point_added.connect(self._add_point)
@@ -78,6 +80,10 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self._clear_points)
         self.refresh_button.clicked.connect(self._refresh_devices)
         self.tunneld_button.clicked.connect(self._start_tunneld)
+
+        self.simulation_timer = QTimer(self)
+        self.simulation_timer.setInterval(1000)
+        self.simulation_timer.timeout.connect(self._advance_simulation_marker)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -161,8 +167,10 @@ class MainWindow(QMainWindow):
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = self._output_dir / f"simulation_{timestamp}.gpx"
+        speed_kmh = float(self.speed_input.value())
         jitter_meters = float(self.jitter_input.value()) if self.mode_combo.currentText() == "Route" else 0.0
-        write_gpx(path, points, speed_kmh=float(self.speed_input.value()), jitter_meters=jitter_meters)
+        write_gpx(path, points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
+        simulation_points = build_gpx_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
 
         if self.bridge_combo.currentText() == "iPhone" and self.mode_combo.currentText() == "Single point":
             point = points[0]
@@ -174,12 +182,12 @@ class MainWindow(QMainWindow):
         if result.detail:
             self._log(f"Detail: {result.detail}")
         self._log(f"GPX: {path}")
-        self.current_label.setText(f"Current: {points[0].lat:.6f}, {points[0].lon:.6f}")
-        self.map_view.set_current_position(points[0], "Simulating")
+        self._start_simulation_marker(simulation_points)
         if jitter_meters > 0:
             self._log(f"Route GPS jitter: up to {jitter_meters:.1f} m")
 
     def _stop(self) -> None:
+        self.simulation_timer.stop()
         result = self._bridge.stop_location()
         self._log(result.message)
         if result.detail:
@@ -226,6 +234,32 @@ class MainWindow(QMainWindow):
             self.map_view.set_points(self._points)
             self.map_view.set_current_position(point, "Selected")
             self._log("Single point mode keeps only the latest point.")
+
+    def _start_simulation_marker(self, points: list[Coordinate]) -> None:
+        self.simulation_timer.stop()
+        self._simulation_points = points
+        self._simulation_index = 0
+        self._show_current_position(points[0], "Simulating")
+
+        if self.mode_combo.currentText() == "Route" and len(points) > 1:
+            self.simulation_timer.start()
+
+    def _advance_simulation_marker(self) -> None:
+        if not self._simulation_points:
+            self.simulation_timer.stop()
+            return
+
+        if self._simulation_index >= len(self._simulation_points) - 1:
+            self.simulation_timer.stop()
+            self._show_current_position(self._simulation_points[-1], "Arrived")
+            return
+
+        self._simulation_index += 1
+        self._show_current_position(self._simulation_points[self._simulation_index], "Simulating")
+
+    def _show_current_position(self, point: Coordinate, status: str) -> None:
+        self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
+        self.map_view.set_current_position(point, status)
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")

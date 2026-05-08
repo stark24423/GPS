@@ -1,4 +1,4 @@
-from src.gpx import generate_gpx
+from src.gpx import build_gpx_points, generate_gpx
 from src.models import Coordinate
 
 
@@ -35,3 +35,18 @@ def test_generate_route_gpx_can_apply_jitter_without_moving_endpoints():
 
     assert "<trkpt lat=\"25.03300000\" lon=\"121.56540000\">" in xml
     assert "25.04000000" in xml
+
+
+def test_build_gpx_points_returns_interpolated_preview_points():
+    points = build_gpx_points(
+        [
+            Coordinate(25.033, 121.5654),
+            Coordinate(25.04, 121.57),
+        ],
+        speed_kmh=30,
+        jitter_meters=5,
+    )
+
+    assert len(points) > 2
+    assert points[0] == Coordinate(25.033, 121.5654)
+    assert points[-1] == Coordinate(25.04, 121.57)
