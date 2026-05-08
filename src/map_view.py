@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QUrl, Signal, Slot
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
+
+from src.models import Coordinate
+
+
+class MapBridge(QObject):
+    point_added = Signal(float, float)
+    points_cleared = Signal()
+
+    @Slot(float, float)
+    def addPoint(self, lat: float, lon: float) -> None:
+        self.point_added.emit(lat, lon)
+
+    @Slot()
+    def clearPoints(self) -> None:
+        self.points_cleared.emit()
+
+
+class MapView(QWebEngineView):
+    point_added = Signal(Coordinate)
+    points_cleared = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        self.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+
+        self._bridge = MapBridge()
+        self._channel = QWebChannel(self.page())
+        self._channel.registerObject("pythonBridge", self._bridge)
+        self.page().setWebChannel(self._channel)
+
+        self._bridge.point_added.connect(self._on_point_added)
+        self._bridge.points_cleared.connect(self.points_cleared.emit)
+
+        html_path = Path(__file__).resolve().parent.parent / "assets" / "map.html"
+        self.load(QUrl.fromLocalFile(str(html_path)))
+
+    def set_points(self, points: list[Coordinate]) -> None:
+        payload = json.dumps([{"lat": point.lat, "lon": point.lon} for point in points])
+        self.page().runJavaScript(f"window.setRoutePoints({payload});")
+
+    def clear_points(self) -> None:
+        self.page().runJavaScript("window.clearRoutePoints();")
+
+    def _on_point_added(self, lat: float, lon: float) -> None:
+        self.point_added.emit(Coordinate(lat=lat, lon=lon))
