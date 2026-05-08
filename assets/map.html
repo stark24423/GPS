@@ -37,11 +37,52 @@
     button:hover {
       background: #f3f4f6;
     }
+
+    button:disabled {
+      color: #9ca3af;
+      background: #f3f4f6;
+      cursor: not-allowed;
+    }
+
+    .current-dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #0ea5e9;
+      border: 3px solid #ffffff;
+      box-shadow: 0 0 0 2px #0369a1, 0 2px 8px rgba(0,0,0,0.35);
+    }
+
+    .current-dot::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 18px;
+      height: 18px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      border: 2px solid rgba(14, 165, 233, 0.45);
+      animation: pulse 1.5s ease-out infinite;
+    }
+
+    @keyframes pulse {
+      from {
+        width: 18px;
+        height: 18px;
+        opacity: 0.9;
+      }
+      to {
+        width: 44px;
+        height: 44px;
+        opacity: 0;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="toolbar">
-    <button onclick="clearRoutePointsFromUi()">Clear</button>
+    <button id="clearButton" onclick="clearRoutePointsFromUi()">Clear</button>
   </div>
   <div id="map"></div>
   <script>
@@ -49,12 +90,15 @@
     const defaultPosition = {lat: 24.7808548, lon: 121.0252718};
     const map = L.map('map').setView([defaultPosition.lat, defaultPosition.lon], 17);
     const markers = [];
+    let editingLocked = false;
     let polyline = null;
     let currentMarker = null;
+    let currentAnimationFrame = null;
+    let currentAnimation = null;
 
     const currentIcon = L.divIcon({
       className: 'current-position-marker',
-      html: '<div style="width:18px;height:18px;border-radius:50%;background:#0ea5e9;border:3px solid #ffffff;box-shadow:0 0 0 2px #0369a1,0 2px 8px rgba(0,0,0,0.35);"></div>',
+      html: '<div class="current-dot"></div>',
       iconSize: [24, 24],
       iconAnchor: [12, 12]
     });
@@ -71,7 +115,7 @@
     }
 
     map.on('click', function(event) {
-      if (pythonBridge) {
+      if (!editingLocked && pythonBridge) {
         pythonBridge.addPoint(event.latlng.lat, event.latlng.lng);
       }
     });
@@ -101,16 +145,88 @@
     };
 
     window.setCurrentPosition = function(point, status) {
+      window.stopCurrentAnimation(status || 'Current');
       const latLng = [point.lat, point.lon];
       if (!currentMarker) {
         currentMarker = L.marker(latLng, {icon: currentIcon, zIndexOffset: 1000}).addTo(map);
       } else {
         currentMarker.setLatLng(latLng);
       }
-      currentMarker.bindTooltip(status || 'Current', {permanent: false, direction: 'right'});
+      currentMarker.bindTooltip(status || 'Current', {permanent: true, direction: 'right', offset: [12, 0]});
+      currentMarker.openTooltip();
+    };
+
+    window.startCurrentAnimation = function(points, stepMs) {
+      if (!points || points.length === 0) {
+        return;
+      }
+      window.stopCurrentAnimation('Simulating');
+      const first = points[0];
+      if (!currentMarker) {
+        currentMarker = L.marker([first.lat, first.lon], {icon: currentIcon, zIndexOffset: 1000}).addTo(map);
+      }
+      currentMarker.bindTooltip('Simulating', {permanent: true, direction: 'right', offset: [12, 0]});
+      currentMarker.openTooltip();
+
+      if (points.length === 1) {
+        currentMarker.setLatLng([first.lat, first.lon]);
+        return;
+      }
+
+      currentAnimation = {
+        points: points,
+        stepMs: Math.max(120, stepMs || 1000),
+        segmentIndex: 0,
+        segmentStartTime: performance.now()
+      };
+      currentAnimationFrame = requestAnimationFrame(animateCurrentPosition);
+    };
+
+    function animateCurrentPosition(now) {
+      if (!currentAnimation || !currentMarker) {
+        return;
+      }
+
+      const points = currentAnimation.points;
+      const index = currentAnimation.segmentIndex;
+      if (index >= points.length - 1) {
+        currentMarker.setLatLng([points[points.length - 1].lat, points[points.length - 1].lon]);
+        currentMarker.setTooltipContent('Arrived');
+        currentAnimation = null;
+        currentAnimationFrame = null;
+        return;
+      }
+
+      const start = points[index];
+      const end = points[index + 1];
+      const elapsed = now - currentAnimation.segmentStartTime;
+      const rawT = Math.min(1, elapsed / currentAnimation.stepMs);
+      const easedT = rawT < 0.5 ? 2 * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 2) / 2;
+      const lat = start.lat + (end.lat - start.lat) * easedT;
+      const lon = start.lon + (end.lon - start.lon) * easedT;
+      currentMarker.setLatLng([lat, lon]);
+
+      if (rawT >= 1) {
+        currentAnimation.segmentIndex += 1;
+        currentAnimation.segmentStartTime = now;
+      }
+
+      currentAnimationFrame = requestAnimationFrame(animateCurrentPosition);
+    }
+
+    window.stopCurrentAnimation = function(status) {
+      if (currentAnimationFrame) {
+        cancelAnimationFrame(currentAnimationFrame);
+      }
+      currentAnimationFrame = null;
+      currentAnimation = null;
+      if (currentMarker && status) {
+        currentMarker.setTooltipContent(status);
+      }
     };
 
     window.clearCurrentPosition = function() {
+      window.stopCurrentAnimation();
       if (currentMarker) {
         map.removeLayer(currentMarker);
         currentMarker = null;
@@ -118,11 +234,22 @@
     };
 
     window.clearRoutePointsFromUi = function() {
+      if (editingLocked) {
+        return;
+      }
       window.clearRoutePoints();
       window.clearCurrentPosition();
       if (pythonBridge) {
         pythonBridge.clearPoints();
       }
+    };
+
+    window.setEditingLocked = function(locked) {
+      editingLocked = Boolean(locked);
+      const clearButton = document.getElementById('clearButton');
+      clearButton.disabled = editingLocked;
+      clearButton.title = editingLocked ? 'Stop the current simulation before clearing points.' : '';
+      map.getContainer().style.cursor = editingLocked ? 'default' : '';
     };
 
     window.setCurrentPosition(defaultPosition, 'Start');

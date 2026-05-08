@@ -56,6 +56,17 @@ class MapView(QWebEngineView):
         status_payload = json.dumps(status)
         self.page().runJavaScript(f"window.setCurrentPosition({payload}, {status_payload});")
 
+    def start_current_animation(self, points: list[Coordinate], step_ms: int = 1000) -> None:
+        payload = json.dumps([{"lat": point.lat, "lon": point.lon} for point in points])
+        self.page().runJavaScript(f"window.startCurrentAnimation({payload}, {step_ms});")
+
+    def stop_current_animation(self, status: str = "Stopped") -> None:
+        status_payload = json.dumps(status)
+        self.page().runJavaScript(f"window.stopCurrentAnimation({status_payload});")
+
+    def set_editing_locked(self, locked: bool) -> None:
+        self.page().runJavaScript(f"window.setEditingLocked({str(locked).lower()});")
+
     def clear_current_position(self) -> None:
         self.page().runJavaScript("window.clearCurrentPosition();")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -68,16 +69,22 @@ class MainWindow(QMainWindow):
         self.device_label = QLabel("Device: dry-run / no bridge configured")
         self.points_label = QLabel("Points: 0")
         self.current_label = QLabel("Current: -")
+        self.status_label = QLabel("Status: idle")
 
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
         self.clear_button = QPushButton("Clear points")
+        self.undo_button = QPushButton("Remove last point")
+        self.output_button = QPushButton("Open output folder")
         self.refresh_button = QPushButton("Refresh devices")
         self.tunneld_button = QPushButton("Start tunneld")
+        self.stop_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_points)
+        self.undo_button.clicked.connect(self._remove_last_point)
+        self.output_button.clicked.connect(self._open_output_folder)
         self.refresh_button.clicked.connect(self._refresh_devices)
         self.tunneld_button.clicked.connect(self._start_tunneld)
 
@@ -118,13 +125,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.jitter_input)
         layout.addWidget(self.points_label)
         layout.addWidget(self.current_label)
+        layout.addWidget(self.status_label)
         layout.addWidget(self.device_label)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
         layout.addLayout(buttons)
+        layout.addWidget(self.undo_button)
         layout.addWidget(self.clear_button)
+        layout.addWidget(self.output_button)
         layout.addWidget(self.tunneld_button)
         layout.addWidget(self.refresh_button)
         layout.addWidget(QLabel("Log"))
@@ -144,12 +154,35 @@ class MainWindow(QMainWindow):
         self._log(f"Added point: {point.lat:.6f}, {point.lon:.6f}")
 
     def _clear_points(self) -> None:
+        self.simulation_timer.stop()
+        self.map_view.stop_current_animation("Stopped")
         self._points.clear()
         self.points_label.setText("Points: 0")
         self.current_label.setText("Current: -")
         self.map_view.clear_points()
         self.map_view.clear_current_position()
+        self.status_label.setText("Status: idle")
         self._log("Cleared points.")
+
+    def _remove_last_point(self) -> None:
+        if not self._points:
+            return
+
+        removed = self._points.pop()
+        self.points_label.setText(f"Points: {len(self._points)}")
+        self.map_view.set_points(self._points)
+        if self._points:
+            point = self._points[-1]
+            self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
+            self.map_view.set_current_position(point, "Selected")
+        else:
+            self.current_label.setText("Current: -")
+            self.map_view.clear_current_position()
+        self._log(f"Removed point: {removed.lat:.6f}, {removed.lon:.6f}")
+
+    def _open_output_folder(self) -> None:
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(self._output_dir)
 
     def _selected_points(self) -> list[Coordinate]:
         if self.mode_combo.currentText() == "Single point":
@@ -157,6 +190,10 @@ class MainWindow(QMainWindow):
         return list(self._points)
 
     def _start(self) -> None:
+        if self.stop_button.isEnabled():
+            QMessageBox.information(self, "Simulation active", "Stop the current simulation before starting another one.")
+            return
+
         points = self._selected_points()
         if not points:
             QMessageBox.warning(self, "Missing location", "Click the map to add at least one point first.")
@@ -182,12 +219,15 @@ class MainWindow(QMainWindow):
         if result.detail:
             self._log(f"Detail: {result.detail}")
         self._log(f"GPX: {path}")
-        self._start_simulation_marker(simulation_points)
+        if result.ok:
+            self._set_running(True)
+            self._start_simulation_marker(simulation_points)
         if jitter_meters > 0:
             self._log(f"Route GPS jitter: up to {jitter_meters:.1f} m")
 
     def _stop(self) -> None:
         self.simulation_timer.stop()
+        self.map_view.stop_current_animation("Stopped")
         result = self._bridge.stop_location()
         self._log(result.message)
         if result.detail:
@@ -195,6 +235,7 @@ class MainWindow(QMainWindow):
         self.current_label.setText("Current: stopped")
         if self._points:
             self.map_view.set_current_position(self._points[-1], "Stopped")
+        self._set_running(False)
 
     def _refresh_devices(self) -> None:
         devices = self._bridge.list_devices()
@@ -242,6 +283,7 @@ class MainWindow(QMainWindow):
         self._show_current_position(points[0], "Simulating")
 
         if self.mode_combo.currentText() == "Route" and len(points) > 1:
+            self.map_view.start_current_animation(points, step_ms=self.simulation_timer.interval())
             self.simulation_timer.start()
 
     def _advance_simulation_marker(self) -> None:
@@ -251,15 +293,30 @@ class MainWindow(QMainWindow):
 
         if self._simulation_index >= len(self._simulation_points) - 1:
             self.simulation_timer.stop()
+            self.map_view.stop_current_animation("Arrived")
             self._show_current_position(self._simulation_points[-1], "Arrived")
+            self.status_label.setText("Status: arrived; press Stop to clear")
             return
 
         self._simulation_index += 1
-        self._show_current_position(self._simulation_points[self._simulation_index], "Simulating")
+        point = self._simulation_points[self._simulation_index]
+        self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
 
     def _show_current_position(self, point: Coordinate, status: str) -> None:
         self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
         self.map_view.set_current_position(point, status)
+
+    def _set_running(self, running: bool) -> None:
+        self.start_button.setEnabled(not running)
+        self.stop_button.setEnabled(running)
+        self.clear_button.setEnabled(not running)
+        self.undo_button.setEnabled(not running)
+        self.mode_combo.setEnabled(not running)
+        self.bridge_combo.setEnabled(not running)
+        self.speed_input.setEnabled(not running)
+        self.jitter_input.setEnabled(not running)
+        self.map_view.set_editing_locked(running)
+        self.status_label.setText("Status: running" if running else "Status: idle")
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
