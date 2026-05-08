@@ -51,5 +51,13 @@ class MapView(QWebEngineView):
     def clear_points(self) -> None:
         self.page().runJavaScript("window.clearRoutePoints();")
 
+    def set_current_position(self, point: Coordinate, status: str = "Current") -> None:
+        payload = json.dumps({"lat": point.lat, "lon": point.lon})
+        status_payload = json.dumps(status)
+        self.page().runJavaScript(f"window.setCurrentPosition({payload}, {status_payload});")
+
+    def clear_current_position(self) -> None:
+        self.page().runJavaScript("window.clearCurrentPosition();")
+
     def _on_point_added(self, lat: float, lon: float) -> None:
         self.point_added.emit(Coordinate(lat=lat, lon=lon))

@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         self.points_label.setText(f"Points: {len(self._points)}")
         self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
         self.map_view.set_points(self._points)
+        self.map_view.set_current_position(point, "Selected")
         self._log(f"Added point: {point.lat:.6f}, {point.lon:.6f}")
 
     def _clear_points(self) -> None:
@@ -141,6 +142,7 @@ class MainWindow(QMainWindow):
         self.points_label.setText("Points: 0")
         self.current_label.setText("Current: -")
         self.map_view.clear_points()
+        self.map_view.clear_current_position()
         self._log("Cleared points.")
 
     def _selected_points(self) -> list[Coordinate]:
@@ -173,6 +175,7 @@ class MainWindow(QMainWindow):
             self._log(f"Detail: {result.detail}")
         self._log(f"GPX: {path}")
         self.current_label.setText(f"Current: {points[0].lat:.6f}, {points[0].lon:.6f}")
+        self.map_view.set_current_position(points[0], "Simulating")
         if jitter_meters > 0:
             self._log(f"Route GPS jitter: up to {jitter_meters:.1f} m")
 
@@ -182,6 +185,8 @@ class MainWindow(QMainWindow):
         if result.detail:
             self._log(f"Detail: {result.detail}")
         self.current_label.setText("Current: stopped")
+        if self._points:
+            self.map_view.set_current_position(self._points[-1], "Stopped")
 
     def _refresh_devices(self) -> None:
         devices = self._bridge.list_devices()
@@ -219,6 +224,7 @@ class MainWindow(QMainWindow):
             point = self._points[0]
             self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
             self.map_view.set_points(self._points)
+            self.map_view.set_current_position(point, "Selected")
             self._log("Single point mode keeps only the latest point.")
 
     def _log(self, message: str) -> None:

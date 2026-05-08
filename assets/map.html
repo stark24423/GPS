@@ -49,6 +49,14 @@
     const map = L.map('map').setView([25.0330, 121.5654], 13);
     const markers = [];
     let polyline = null;
+    let currentMarker = null;
+
+    const currentIcon = L.divIcon({
+      className: 'current-position-marker',
+      html: '<div style="width:18px;height:18px;border-radius:50%;background:#0ea5e9;border:3px solid #ffffff;box-shadow:0 0 0 2px #0369a1,0 2px 8px rgba(0,0,0,0.35);"></div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -91,8 +99,26 @@
       window.setRoutePoints([]);
     };
 
+    window.setCurrentPosition = function(point, status) {
+      const latLng = [point.lat, point.lon];
+      if (!currentMarker) {
+        currentMarker = L.marker(latLng, {icon: currentIcon, zIndexOffset: 1000}).addTo(map);
+      } else {
+        currentMarker.setLatLng(latLng);
+      }
+      currentMarker.bindTooltip(status || 'Current', {permanent: false, direction: 'right'});
+    };
+
+    window.clearCurrentPosition = function() {
+      if (currentMarker) {
+        map.removeLayer(currentMarker);
+        currentMarker = null;
+      }
+    };
+
     window.clearRoutePointsFromUi = function() {
       window.clearRoutePoints();
+      window.clearCurrentPosition();
       if (pythonBridge) {
         pythonBridge.clearPoints();
       }
