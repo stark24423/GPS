@@ -24,6 +24,7 @@ from src.bridge import DryRunBridge, PymobileDeviceBridge
 from src.gpx import write_gpx
 from src.map_view import MapView
 from src.models import Coordinate
+from src.tunneld import start_tunneld_admin
 
 
 class MainWindow(QMainWindow):
@@ -62,11 +63,13 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("Stop")
         self.clear_button = QPushButton("Clear points")
         self.refresh_button = QPushButton("Refresh devices")
+        self.tunneld_button = QPushButton("Start tunneld")
 
         self.start_button.clicked.connect(self._start)
         self.stop_button.clicked.connect(self._stop)
         self.clear_button.clicked.connect(self._clear_points)
         self.refresh_button.clicked.connect(self._refresh_devices)
+        self.tunneld_button.clicked.connect(self._start_tunneld)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -105,6 +108,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.stop_button)
         layout.addLayout(buttons)
         layout.addWidget(self.clear_button)
+        layout.addWidget(self.tunneld_button)
         layout.addWidget(self.refresh_button)
         layout.addWidget(QLabel("Log"))
         layout.addWidget(self.log, stretch=1)
@@ -167,6 +171,14 @@ class MainWindow(QMainWindow):
         else:
             self.device_label.setText("Device: dry-run / no iPhone bridge detected")
             self._log("No iPhone bridge device detected. Dry-run remains available.")
+
+    def _start_tunneld(self) -> None:
+        result = start_tunneld_admin(Path.cwd())
+        self._log(result.message)
+        if result.detail:
+            self._log(f"Detail: {result.detail}")
+        if not result.ok:
+            QMessageBox.warning(self, "tunneld", result.message)
 
     def _log_requirements(self) -> None:
         for requirement in self._bridge.check_requirements():
