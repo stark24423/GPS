@@ -11,17 +11,15 @@ def start_tunneld_admin(project_root: Path) -> BridgeResult:
     if not script_path.exists():
         return BridgeResult(ok=False, message="tunneld startup script was not found.", detail=str(script_path))
 
-    command = [
-        "powershell.exe",
-        "-NoExit",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script_path),
-    ]
+    script = str(script_path).replace("'", "''")
+    elevated_command = (
+        "Start-Process powershell.exe "
+        f"-ArgumentList '-NoExit -ExecutionPolicy Bypass -File ''{script}''' "
+        "-Verb RunAs"
+    )
 
     try:
-        subprocess.Popen(command, shell=True)
+        subprocess.Popen(["powershell.exe", "-NoProfile", "-Command", elevated_command])
     except OSError as exc:
         return BridgeResult(ok=False, message="Failed to request Administrator tunneld window.", detail=str(exc))
 
