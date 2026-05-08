@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Single point", "Route"])
+        self.mode_combo.currentTextChanged.connect(self._mode_changed)
 
         self.bridge_combo = QComboBox()
         self.bridge_combo.addItems(["Dry-run", "iPhone"])
@@ -116,7 +117,10 @@ class MainWindow(QMainWindow):
         return panel
 
     def _add_point(self, point: Coordinate) -> None:
-        self._points.append(point)
+        if self.mode_combo.currentText() == "Single point":
+            self._points = [point]
+        else:
+            self._points.append(point)
         self.points_label.setText(f"Points: {len(self._points)}")
         self.map_view.set_points(self._points)
         self._log(f"Added point: {point.lat:.6f}, {point.lon:.6f}")
@@ -190,6 +194,13 @@ class MainWindow(QMainWindow):
         self._log(f"Bridge mode changed to {value}.")
         self._refresh_devices()
         self._log_requirements()
+
+    def _mode_changed(self, value: str) -> None:
+        if value == "Single point" and len(self._points) > 1:
+            self._points = self._points[-1:]
+            self.points_label.setText(f"Points: {len(self._points)}")
+            self.map_view.set_points(self._points)
+            self._log("Single point mode keeps only the latest point.")
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
