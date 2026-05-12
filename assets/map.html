@@ -24,24 +24,33 @@
     }
 
     button {
-      border: 1px solid #9ca3af;
+      border: 1px solid #e2e8f0;
       background: #ffffff;
-      color: #111827;
-      border-radius: 6px;
-      padding: 8px 10px;
+      color: #0f172a;
+      border-radius: 8px;
+      padding: 8px 14px;
       font-size: 13px;
+      font-weight: 500;
+      font-family: "Segoe UI", "Microsoft JhengHei UI", system-ui, sans-serif;
       cursor: pointer;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+      box-shadow: 0 4px 12px rgba(15,23,42,0.10);
+      transition: background 120ms ease, transform 120ms ease;
     }
 
     button:hover {
-      background: #f3f4f6;
+      background: #f8fafc;
+      border-color: #cbd5e1;
+    }
+
+    button:active {
+      transform: translateY(1px);
     }
 
     button:disabled {
-      color: #9ca3af;
-      background: #f3f4f6;
+      color: #94a3b8;
+      background: #f8fafc;
       cursor: not-allowed;
+      box-shadow: none;
     }
 
     .current-dot {
@@ -164,20 +173,23 @@
       const first = points[0];
       if (!currentMarker) {
         currentMarker = L.marker([first.lat, first.lon], {icon: currentIcon, zIndexOffset: 1000}).addTo(map);
+      } else {
+        currentMarker.setLatLng([first.lat, first.lon]);
       }
       currentMarker.bindTooltip('Simulating', {permanent: true, direction: 'right', offset: [12, 0]});
       currentMarker.openTooltip();
 
       if (points.length === 1) {
-        currentMarker.setLatLng([first.lat, first.lon]);
         return;
       }
 
+      const segmentMs = Math.max(50, stepMs || 1000);
+      const totalMs = segmentMs * (points.length - 1);
       currentAnimation = {
         points: points,
-        stepMs: Math.max(120, stepMs || 1000),
-        segmentIndex: 0,
-        segmentStartTime: performance.now()
+        totalMs: totalMs,
+        segmentMs: segmentMs,
+        startTime: performance.now()
       };
       currentAnimationFrame = requestAnimationFrame(animateCurrentPosition);
     };
@@ -188,28 +200,27 @@
       }
 
       const points = currentAnimation.points;
-      const index = currentAnimation.segmentIndex;
-      if (index >= points.length - 1) {
-        currentMarker.setLatLng([points[points.length - 1].lat, points[points.length - 1].lon]);
+      const elapsed = now - currentAnimation.startTime;
+      if (elapsed >= currentAnimation.totalMs) {
+        const last = points[points.length - 1];
+        currentMarker.setLatLng([last.lat, last.lon]);
         currentMarker.setTooltipContent('Arrived');
         currentAnimation = null;
         currentAnimationFrame = null;
         return;
       }
 
+      const progress = elapsed / currentAnimation.segmentMs;
+      let index = Math.floor(progress);
+      if (index >= points.length - 1) {
+        index = points.length - 2;
+      }
+      const t = progress - index;
       const start = points[index];
       const end = points[index + 1];
-      const elapsed = now - currentAnimation.segmentStartTime;
-      const rawT = Math.min(1, elapsed / currentAnimation.stepMs);
-      const easedT = rawT < 0.5 ? 2 * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 2) / 2;
-      const lat = start.lat + (end.lat - start.lat) * easedT;
-      const lon = start.lon + (end.lon - start.lon) * easedT;
+      const lat = start.lat + (end.lat - start.lat) * t;
+      const lon = start.lon + (end.lon - start.lon) * t;
       currentMarker.setLatLng([lat, lon]);
-
-      if (rawT >= 1) {
-        currentAnimation.segmentIndex += 1;
-        currentAnimation.segmentStartTime = now;
-      }
 
       currentAnimationFrame = requestAnimationFrame(animateCurrentPosition);
     }

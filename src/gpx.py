@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from xml.etree.ElementTree import Element, SubElement, tostring
-from xml.dom import minidom
+from xml.etree.ElementTree import Element, SubElement, indent, tostring
 
 from src.models import Coordinate
 from src.route import apply_route_jitter, build_timed_route
@@ -16,8 +15,8 @@ def _format_time(value: datetime) -> str:
 
 
 def _prettify_xml(root: Element) -> str:
-    rough = tostring(root, encoding="utf-8")
-    return minidom.parseString(rough).toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
+    indent(root, space="  ")
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + tostring(root, encoding="unicode")
 
 
 def generate_gpx(

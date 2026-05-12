@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 from pathlib import Path
 
 from src.models import BridgeResult
@@ -40,6 +39,10 @@ def stop_tunneld_admin(project_root: Path) -> BridgeResult:
     )
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
 def get_tunneld_pid(project_root: Path) -> int | None:
     pid_file = project_root / "output" / "tunneld.pid"
     if not pid_file.exists():
@@ -50,19 +53,14 @@ def get_tunneld_pid(project_root: Path) -> int | None:
     except ValueError:
         return None
 
-    result = subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            f"if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'running' }}",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=3,
-        check=False,
-    )
-    if "running" not in result.stdout:
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
         return None
-
-    return pid
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return None
+        return pid if exit_code.value == _STILL_ACTIVE else None
+    finally:
+        kernel32.CloseHandle(handle)

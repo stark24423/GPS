@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -14,25 +15,37 @@ class PymobileDeviceBridge(Bridge):
         self._active_process: subprocess.Popen[str] | None = None
 
     def list_devices(self) -> list[DeviceInfo]:
-        result = self._run(["usbmux", "list"], timeout=15)
-        if result.returncode != 0:
-            return []
-
         try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError:
+            return asyncio.run(self._list_devices_async())
+        except Exception:
             return []
 
-        return [
-            DeviceInfo(
-                id=item.get("UniqueDeviceID") or item.get("Identifier") or "unknown",
-                name=item.get("DeviceName") or "iPhone",
-                kind="ios",
-                connected=item.get("ConnectionType") == "USB",
+    @staticmethod
+    async def _list_devices_async() -> list[DeviceInfo]:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices as usbmux_list_devices
+
+        devices: list[DeviceInfo] = []
+        for mux in await usbmux_list_devices():
+            name = "iPhone"
+            kind = "ios"
+            try:
+                lockdown = await create_using_usbmux(serial=mux.serial)
+                name = lockdown.all_values.get("DeviceName") or name
+                device_class = lockdown.all_values.get("DeviceClass", "")
+                if device_class and device_class.lower() != "iphone":
+                    continue
+            except Exception:
+                pass
+            devices.append(
+                DeviceInfo(
+                    id=mux.serial,
+                    name=name,
+                    kind=kind,
+                    connected=str(getattr(mux, "connection_type", "")).upper() == "USB",
+                )
             )
-            for item in payload
-            if item.get("DeviceClass") == "iPhone"
-        ]
+        return devices
 
     def start_location(self, gpx_path: str) -> BridgeResult:
         path = Path(gpx_path)
@@ -103,6 +116,13 @@ class PymobileDeviceBridge(Bridge):
                 124,
                 exc.stdout or "",
                 exc.stderr or f"Command timed out after {timeout} seconds.",
+            )
+        except (FileNotFoundError, OSError) as exc:
+            return subprocess.CompletedProcess(
+                [self.executable, *args],
+                127,
+                "",
+                f"pymobiledevice3 executable not available: {exc}",
             )
 
     def _start_interactive(self, args: list[str], success_message: str) -> BridgeResult:

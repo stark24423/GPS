@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -28,17 +31,86 @@ from src.models import Coordinate
 from src.tunneld import get_tunneld_pid, start_tunneld_admin, stop_tunneld_admin
 
 
+STYLE_SHEET = """
+* { font-family: "Segoe UI", "Microsoft JhengHei UI", system-ui, sans-serif; font-size: 13px; color: #0f172a; }
+QMainWindow, QWidget { background: #f1f5f9; }
+#sidePanel { background: #ffffff; border-left: 1px solid #e2e8f0; }
+#title { font-size: 20px; font-weight: 600; color: #0f172a; }
+#subtitle { font-size: 12px; color: #64748b; }
+QGroupBox {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    margin-top: 14px;
+    padding: 14px 12px 10px 12px;
+    font-weight: 600;
+    color: #334155;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #475569; }
+QLabel { color: #334155; background: transparent; }
+QLabel#muted { color: #64748b; font-size: 12px; }
+QComboBox, QDoubleSpinBox {
+    background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
+    padding: 6px 8px; min-height: 22px;
+    selection-background-color: #2563eb; selection-color: white;
+}
+QComboBox:focus, QDoubleSpinBox:focus { border-color: #2563eb; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background: white; border: 1px solid #cbd5e1; border-radius: 6px;
+    selection-background-color: #2563eb; selection-color: white; outline: 0;
+}
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 16px; border: none; background: transparent; }
+QPushButton {
+    background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
+    padding: 7px 14px; color: #0f172a; font-weight: 500;
+}
+QPushButton:hover { background: #f1f5f9; border-color: #94a3b8; }
+QPushButton:pressed { background: #e2e8f0; }
+QPushButton:disabled { color: #94a3b8; background: #f8fafc; border-color: #e2e8f0; }
+QPushButton#primary { background: #2563eb; color: white; border: 1px solid #2563eb; }
+QPushButton#primary:hover { background: #1d4ed8; border-color: #1d4ed8; }
+QPushButton#primary:pressed { background: #1e40af; }
+QPushButton#primary:disabled { background: #93c5fd; color: white; border-color: #93c5fd; }
+QPushButton#danger { background: #ef4444; color: white; border: 1px solid #ef4444; }
+QPushButton#danger:hover { background: #dc2626; border-color: #dc2626; }
+QPushButton#danger:disabled { background: #fca5a5; color: white; border-color: #fca5a5; }
+QLabel#statusDot { border-radius: 6px; min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px; }
+QLabel#statusDot[state="idle"] { background: #94a3b8; }
+QLabel#statusDot[state="running"] { background: #22c55e; }
+QLabel#statusDot[state="arrived"] { background: #f59e0b; }
+QLabel#statusDot[state="error"] { background: #ef4444; }
+QPlainTextEdit {
+    background: #0f172a; color: #cbd5e1;
+    border: 1px solid #1e293b; border-radius: 8px; padding: 8px;
+    font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+    font-size: 12px;
+}
+QSplitter::handle { background: #e2e8f0; width: 1px; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: #cbd5e1; border-radius: 5px; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: #94a3b8; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 class MainWindow(QMainWindow):
+    iphone_scan_completed = Signal(list, str)
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Python iPhone GPS Simulator Prototype")
-        self.resize(1200, 760)
+        self.setWindowTitle("GPS Simulator")
+        self.resize(1280, 800)
+        self.setStyleSheet(STYLE_SHEET)
 
         self._points: list[Coordinate] = []
         self._dry_run_bridge = DryRunBridge()
-        self._iphone_bridge = PymobileDeviceBridge(str(Path.cwd() / ".venv" / "Scripts" / "pymobiledevice3.exe"))
+        self._iphone_bridge = PymobileDeviceBridge(str(PROJECT_ROOT / ".venv" / "Scripts" / "pymobiledevice3.exe"))
         self._bridge = self._dry_run_bridge
-        self._output_dir = Path.cwd() / "output"
+        self._output_dir = PROJECT_ROOT / "output"
         self._simulation_points: list[Coordinate] = []
         self._simulation_index = 0
 
@@ -67,15 +139,24 @@ class MainWindow(QMainWindow):
         self.jitter_input.setDecimals(1)
 
         self.device_label = QLabel("Device: dry-run / no bridge configured")
+        self.device_label.setObjectName("muted")
+        self.device_label.setWordWrap(True)
         self.points_label = QLabel("Points: 0")
         self.current_label = QLabel("Current: -")
-        self.status_label = QLabel("Status: idle")
+        self.current_label.setWordWrap(True)
+        self.status_label = QLabel("Idle")
         self.tunneld_label = QLabel("tunneld: unknown")
+        self.tunneld_label.setObjectName("muted")
+        self.status_dot = QLabel()
+        self.status_dot.setObjectName("statusDot")
+        self.status_dot.setProperty("state", "idle")
 
         self.start_button = QPushButton("Start")
+        self.start_button.setObjectName("primary")
         self.stop_button = QPushButton("Stop")
+        self.stop_button.setObjectName("danger")
         self.clear_button = QPushButton("Clear points")
-        self.undo_button = QPushButton("Remove last point")
+        self.undo_button = QPushButton("Undo last")
         self.output_button = QPushButton("Open output folder")
         self.refresh_button = QPushButton("Refresh devices")
         self.tunneld_button = QPushButton("Start tunneld")
@@ -93,6 +174,7 @@ class MainWindow(QMainWindow):
 
         self.simulation_timer = QTimer(self)
         self.simulation_timer.setInterval(1000)
+        self.simulation_timer.setTimerType(Qt.PreciseTimer)
         self.simulation_timer.timeout.connect(self._advance_simulation_marker)
 
         self.log = QPlainTextEdit()
@@ -114,36 +196,73 @@ class MainWindow(QMainWindow):
         self._refresh_tunneld_status()
         self._refresh_devices()
         self._log_requirements()
+        QTimer.singleShot(300, self._auto_start_tunneld_if_iphone)
 
     def _build_side_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("sidePanel")
+        panel.setMinimumWidth(320)
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
 
-        layout.addWidget(QLabel("Mode"))
-        layout.addWidget(self.mode_combo)
-        layout.addWidget(QLabel("Bridge"))
-        layout.addWidget(self.bridge_combo)
-        layout.addWidget(QLabel("Speed"))
-        layout.addWidget(self.speed_input)
-        layout.addWidget(QLabel("GPS jitter"))
-        layout.addWidget(self.jitter_input)
-        layout.addWidget(self.points_label)
-        layout.addWidget(self.current_label)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.tunneld_label)
-        layout.addWidget(self.device_label)
+        title = QLabel("GPS Simulator")
+        title.setObjectName("title")
+        subtitle = QLabel("iPhone location playback")
+        subtitle.setObjectName("subtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        layout.addLayout(buttons)
-        layout.addWidget(self.undo_button)
-        layout.addWidget(self.clear_button)
+        status_group = QGroupBox("Status")
+        status_v = QVBoxLayout(status_group)
+        status_v.setSpacing(6)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_row.addWidget(self.status_dot)
+        status_row.addWidget(self.status_label, 1)
+        status_v.addLayout(status_row)
+        status_v.addWidget(self.points_label)
+        status_v.addWidget(self.current_label)
+        layout.addWidget(status_group)
+
+        settings_group = QGroupBox("Settings")
+        form = QFormLayout(settings_group)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setSpacing(8)
+        form.addRow("Mode", self.mode_combo)
+        form.addRow("Bridge", self.bridge_combo)
+        form.addRow("Speed", self.speed_input)
+        form.addRow("GPS jitter", self.jitter_input)
+        layout.addWidget(settings_group)
+
+        iphone_group = QGroupBox("iPhone")
+        iphone_v = QVBoxLayout(iphone_group)
+        iphone_v.setSpacing(6)
+        iphone_v.addWidget(self.device_label)
+        iphone_v.addWidget(self.tunneld_label)
+        tunneld_row = QHBoxLayout()
+        tunneld_row.addWidget(self.tunneld_button)
+        tunneld_row.addWidget(self.stop_tunneld_button)
+        iphone_v.addLayout(tunneld_row)
+        iphone_v.addWidget(self.refresh_button)
+        layout.addWidget(iphone_group)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addWidget(self.start_button)
+        action_row.addWidget(self.stop_button)
+        layout.addLayout(action_row)
+
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(8)
+        tools_row.addWidget(self.undo_button)
+        tools_row.addWidget(self.clear_button)
+        layout.addLayout(tools_row)
         layout.addWidget(self.output_button)
-        layout.addWidget(self.tunneld_button)
-        layout.addWidget(self.stop_tunneld_button)
-        layout.addWidget(self.refresh_button)
-        layout.addWidget(QLabel("Log"))
+
+        log_label = QLabel("Log")
+        log_label.setObjectName("muted")
+        layout.addWidget(log_label)
         layout.addWidget(self.log, stretch=1)
 
         return panel
@@ -167,7 +286,7 @@ class MainWindow(QMainWindow):
         self.current_label.setText("Current: -")
         self.map_view.clear_points()
         self.map_view.clear_current_position()
-        self.status_label.setText("Status: idle")
+        self._set_status("idle", "Idle")
         self._log("Cleared points.")
 
     def _remove_last_point(self) -> None:
@@ -244,17 +363,17 @@ class MainWindow(QMainWindow):
         self._set_running(False)
 
     def _refresh_devices(self) -> None:
-        devices = self._bridge.list_devices()
+        devices = self._iphone_bridge.list_devices()
         if devices:
             names = ", ".join(f"{device.name} ({device.id})" for device in devices)
             self.device_label.setText(f"Device: {names}")
             self._log(f"Detected device(s): {names}")
         else:
-            self.device_label.setText("Device: dry-run / no iPhone bridge detected")
-            self._log("No iPhone bridge device detected. Dry-run remains available.")
+            self.device_label.setText("Device: no iPhone detected")
+            self._log("No iPhone connected. Dry-run remains available.")
 
     def _start_tunneld(self) -> None:
-        result = start_tunneld_admin(Path.cwd())
+        result = start_tunneld_admin(PROJECT_ROOT)
         self._log(result.message)
         if result.detail:
             self._log(f"Detail: {result.detail}")
@@ -263,7 +382,7 @@ class MainWindow(QMainWindow):
         self._refresh_tunneld_status()
 
     def _stop_tunneld(self) -> None:
-        result = stop_tunneld_admin(Path.cwd())
+        result = stop_tunneld_admin(PROJECT_ROOT)
         self._log(result.message)
         if result.detail:
             self._log(f"Detail: {result.detail}")
@@ -271,8 +390,46 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "tunneld", result.message)
         self._refresh_tunneld_status()
 
+    def _auto_start_tunneld_if_iphone(self) -> None:
+        self.device_label.setText("Device: scanning for iPhone…")
+        self._log("Startup scan: looking for connected iPhone…")
+        self.iphone_scan_completed.connect(self._on_iphone_scan_completed)
+
+        def worker() -> None:
+            try:
+                devices = self._iphone_bridge.list_devices()
+                self.iphone_scan_completed.emit(devices, "")
+            except Exception as exc:
+                self.iphone_scan_completed.emit([], str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_iphone_scan_completed(self, devices: list, error: str) -> None:
+        if error:
+            self.device_label.setText("Device: scan failed")
+            self._log(f"iPhone scan failed: {error}")
+            return
+
+        if not devices:
+            self.device_label.setText("Device: no iPhone detected")
+            self._log("Startup scan: no iPhone connected.")
+            return
+
+        names = ", ".join(f"{device.name} ({device.id})" for device in devices)
+        self.device_label.setText(f"Device: {names}")
+        self._log(f"Startup scan: detected iPhone {names}.")
+
+        self.bridge_combo.setCurrentText("iPhone")
+
+        if get_tunneld_pid(PROJECT_ROOT) is not None:
+            self._log("tunneld already running; skipping auto-start.")
+            return
+
+        self._log("Auto-starting tunneld (UAC prompt may appear)…")
+        self._start_tunneld()
+
     def _refresh_tunneld_status(self) -> None:
-        pid = get_tunneld_pid(Path.cwd())
+        pid = get_tunneld_pid(PROJECT_ROOT)
         self.tunneld_label.setText(f"tunneld: background PID {pid}" if pid else "tunneld: not started by GUI")
 
     def _log_requirements(self) -> None:
@@ -315,7 +472,7 @@ class MainWindow(QMainWindow):
             self.simulation_timer.stop()
             self.map_view.stop_current_animation("Arrived")
             self._show_current_position(self._simulation_points[-1], "Arrived")
-            self.status_label.setText("Status: arrived; press Stop to clear")
+            self._set_status("arrived", "Arrived — press Stop to clear")
             return
 
         self._simulation_index += 1
@@ -336,10 +493,19 @@ class MainWindow(QMainWindow):
         self.speed_input.setEnabled(not running)
         self.jitter_input.setEnabled(not running)
         self.map_view.set_editing_locked(running)
-        self.status_label.setText("Status: running" if running else "Status: idle")
+        if running:
+            self._set_status("running", "Running")
+        else:
+            self._set_status("idle", "Idle")
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
+
+    def _set_status(self, state: str, text: str) -> None:
+        self.status_label.setText(text)
+        self.status_dot.setProperty("state", state)
+        self.status_dot.style().unpolish(self.status_dot)
+        self.status_dot.style().polish(self.status_dot)
 
 
 def run() -> None:
