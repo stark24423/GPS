@@ -19,15 +19,19 @@ def _prettify_xml(root: Element) -> str:
     return '<?xml version="1.0" encoding="utf-8"?>\n' + tostring(root, encoding="unicode")
 
 
-def generate_gpx(
+def build_timed_points(
     points: list[Coordinate],
     speed_kmh: float = 5.0,
-    name: str = "GPS Simulation",
     jitter_meters: float = 0.0,
-) -> str:
+) -> list[tuple[Coordinate, datetime]]:
     timed_points = build_timed_route(points, speed_kmh=speed_kmh)
-    timed_points = apply_route_jitter(timed_points, radius_meters=jitter_meters)
+    return apply_route_jitter(timed_points, radius_meters=jitter_meters)
 
+
+def _render_gpx(
+    timed_points: list[tuple[Coordinate, datetime]],
+    name: str = "GPS Simulation",
+) -> str:
     root = Element(
         "gpx",
         {
@@ -60,9 +64,29 @@ def generate_gpx(
 
 
 def build_gpx_points(points: list[Coordinate], speed_kmh: float = 5.0, jitter_meters: float = 0.0) -> list[Coordinate]:
-    timed_points = build_timed_route(points, speed_kmh=speed_kmh)
-    timed_points = apply_route_jitter(timed_points, radius_meters=jitter_meters)
+    timed_points = build_timed_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
     return [point for point, _timestamp in timed_points]
+
+
+def generate_gpx(
+    points: list[Coordinate],
+    speed_kmh: float = 5.0,
+    name: str = "GPS Simulation",
+    jitter_meters: float = 0.0,
+) -> str:
+    timed_points = build_timed_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
+    return _render_gpx(timed_points, name=name)
+
+
+def write_gpx_from_timed(
+    path: str | Path,
+    timed_points: list[tuple[Coordinate, datetime]],
+    name: str = "GPS Simulation",
+) -> Path:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(_render_gpx(timed_points, name=name), encoding="utf-8")
+    return output_path
 
 
 def write_gpx(
@@ -71,7 +95,5 @@ def write_gpx(
     speed_kmh: float = 5.0,
     jitter_meters: float = 0.0,
 ) -> Path:
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(generate_gpx(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters), encoding="utf-8")
-    return output_path
+    timed_points = build_timed_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
+    return write_gpx_from_timed(path, timed_points)

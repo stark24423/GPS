@@ -67,6 +67,9 @@ class MapView(QWebEngineView):
     def set_editing_locked(self, locked: bool) -> None:
         self.page().runJavaScript(f"window.setEditingLocked({str(locked).lower()});")
 
+    def set_follow_mode(self, enabled: bool) -> None:
+        self.page().runJavaScript(f"window.setFollowMode({str(enabled).lower()});")
+
     def clear_current_position(self) -> None:
         self.page().runJavaScript("window.clearCurrentPosition();")
 

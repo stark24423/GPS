@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -25,33 +26,35 @@ from PySide6.QtWidgets import (
 )
 
 from src.bridge import DryRunBridge, PymobileDeviceBridge
-from src.gpx import build_gpx_points, write_gpx
+from src.gpx import build_timed_points, write_gpx_from_timed
+from src.iphone_controller import IPhoneController
+from src.joystick import JoystickWidget
 from src.map_view import MapView
 from src.models import Coordinate
-from src.tunneld import get_tunneld_pid, start_tunneld_admin, stop_tunneld_admin
+from src.tunneld import get_tunneld_pid, start_tunneld_admin
 
 
 STYLE_SHEET = """
 * { font-family: "Segoe UI", "Microsoft JhengHei UI", system-ui, sans-serif; font-size: 13px; color: #0f172a; }
 QMainWindow, QWidget { background: #f1f5f9; }
 #sidePanel { background: #ffffff; border-left: 1px solid #e2e8f0; }
-#title { font-size: 20px; font-weight: 600; color: #0f172a; }
-#subtitle { font-size: 12px; color: #64748b; }
+#title { font-size: 16px; font-weight: 600; color: #0f172a; padding: 2px 0; }
+#subtitle { font-size: 11px; color: #64748b; }
 QGroupBox {
     background: #ffffff;
     border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    margin-top: 14px;
-    padding: 14px 12px 10px 12px;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding: 8px 10px 6px 10px;
     font-weight: 600;
     color: #334155;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #475569; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #475569; font-size: 12px; }
 QLabel { color: #334155; background: transparent; }
 QLabel#muted { color: #64748b; font-size: 12px; }
 QComboBox, QDoubleSpinBox {
     background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
-    padding: 6px 8px; min-height: 22px;
+    padding: 4px 8px; min-height: 18px;
     selection-background-color: #2563eb; selection-color: white;
 }
 QComboBox:focus, QDoubleSpinBox:focus { border-color: #2563eb; }
@@ -63,7 +66,7 @@ QComboBox QAbstractItemView {
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 16px; border: none; background: transparent; }
 QPushButton {
     background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
-    padding: 7px 14px; color: #0f172a; font-weight: 500;
+    padding: 5px 12px; color: #0f172a; font-weight: 500;
 }
 QPushButton:hover { background: #f1f5f9; border-color: #94a3b8; }
 QPushButton:pressed { background: #e2e8f0; }
@@ -99,20 +102,23 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class MainWindow(QMainWindow):
     iphone_scan_completed = Signal(list, str)
+    iphone_op_completed = Signal(bool, str, str)
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GPS Simulator")
-        self.resize(1280, 800)
+        self.resize(1080, 680)
         self.setStyleSheet(STYLE_SHEET)
 
         self._points: list[Coordinate] = []
         self._dry_run_bridge = DryRunBridge()
         self._iphone_bridge = PymobileDeviceBridge(str(PROJECT_ROOT / ".venv" / "Scripts" / "pymobiledevice3.exe"))
+        self._iphone_controller = IPhoneController()
         self._bridge = self._dry_run_bridge
         self._output_dir = PROJECT_ROOT / "output"
         self._simulation_points: list[Coordinate] = []
         self._simulation_index = 0
+        self.iphone_op_completed.connect(self._on_iphone_op_completed)
 
         self.map_view = MapView()
         self.map_view.point_added.connect(self._add_point)
@@ -159,8 +165,6 @@ class MainWindow(QMainWindow):
         self.undo_button = QPushButton("Undo last")
         self.output_button = QPushButton("Open output folder")
         self.refresh_button = QPushButton("Refresh devices")
-        self.tunneld_button = QPushButton("Start tunneld")
-        self.stop_tunneld_button = QPushButton("Stop tunneld")
         self.stop_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start)
@@ -169,17 +173,31 @@ class MainWindow(QMainWindow):
         self.undo_button.clicked.connect(self._remove_last_point)
         self.output_button.clicked.connect(self._open_output_folder)
         self.refresh_button.clicked.connect(self._refresh_devices)
-        self.tunneld_button.clicked.connect(self._start_tunneld)
-        self.stop_tunneld_button.clicked.connect(self._stop_tunneld)
 
         self.simulation_timer = QTimer(self)
         self.simulation_timer.setInterval(1000)
         self.simulation_timer.setTimerType(Qt.PreciseTimer)
         self.simulation_timer.timeout.connect(self._advance_simulation_marker)
 
+        self.joystick = JoystickWidget()
+        self.joystick.direction_changed.connect(self._joystick_direction_changed)
+        self._joystick_dx = 0.0
+        self._joystick_dy = 0.0
+        self._joystick_position: Coordinate | None = None
+        self.joystick_timer = QTimer(self)
+        self.joystick_timer.setInterval(80)
+        self.joystick_timer.setTimerType(Qt.PreciseTimer)
+        self.joystick_timer.timeout.connect(self._joystick_tick)
+        self.joystick_speed_input = QDoubleSpinBox()
+        self.joystick_speed_input.setRange(0.1, 500.0)
+        self.joystick_speed_input.setValue(20.0)
+        self.joystick_speed_input.setSuffix(" km/h")
+        self.joystick_speed_input.setDecimals(1)
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(1000)
+        self.log.setMinimumHeight(80)
 
         root = QWidget()
         root_layout = QHBoxLayout(root)
@@ -187,8 +205,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.map_view)
         splitter.addWidget(self._build_side_panel())
-        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([800, 280])
+        root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.addWidget(splitter)
 
         self.setCentralWidget(root)
@@ -201,17 +221,15 @@ class MainWindow(QMainWindow):
     def _build_side_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("sidePanel")
-        panel.setMinimumWidth(320)
+        panel.setMinimumWidth(280)
+        panel.setMaximumWidth(340)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
 
         title = QLabel("GPS Simulator")
         title.setObjectName("title")
-        subtitle = QLabel("iPhone location playback")
-        subtitle.setObjectName("subtitle")
         layout.addWidget(title)
-        layout.addWidget(subtitle)
 
         status_group = QGroupBox("Status")
         status_v = QVBoxLayout(status_group)
@@ -235,15 +253,23 @@ class MainWindow(QMainWindow):
         form.addRow("GPS jitter", self.jitter_input)
         layout.addWidget(settings_group)
 
+        joystick_group = QGroupBox("Joystick")
+        joy_v = QVBoxLayout(joystick_group)
+        joy_v.setContentsMargins(8, 8, 8, 8)
+        joy_v.setSpacing(8)
+        joy_v.addWidget(self.joystick, alignment=Qt.AlignHCenter)
+        joy_speed_row = QHBoxLayout()
+        joy_speed_row.setContentsMargins(0, 0, 0, 0)
+        joy_speed_row.addWidget(QLabel("Speed"))
+        joy_speed_row.addWidget(self.joystick_speed_input, 1)
+        joy_v.addLayout(joy_speed_row)
+        layout.addWidget(joystick_group)
+
         iphone_group = QGroupBox("iPhone")
         iphone_v = QVBoxLayout(iphone_group)
         iphone_v.setSpacing(6)
         iphone_v.addWidget(self.device_label)
         iphone_v.addWidget(self.tunneld_label)
-        tunneld_row = QHBoxLayout()
-        tunneld_row.addWidget(self.tunneld_button)
-        tunneld_row.addWidget(self.stop_tunneld_button)
-        iphone_v.addLayout(tunneld_row)
         iphone_v.addWidget(self.refresh_button)
         layout.addWidget(iphone_group)
 
@@ -276,11 +302,16 @@ class MainWindow(QMainWindow):
         self.current_label.setText(f"Current: {point.lat:.6f}, {point.lon:.6f}")
         self.map_view.set_points(self._points)
         self.map_view.set_current_position(point, "Selected")
+        self._joystick_position = Coordinate(lat=point.lat, lon=point.lon)
         self._log(f"Added point: {point.lat:.6f}, {point.lon:.6f}")
 
     def _clear_points(self) -> None:
         self.simulation_timer.stop()
+        self.joystick_timer.stop()
+        self.joystick.reset()
+        self._joystick_position = None
         self.map_view.stop_current_animation("Stopped")
+        self.map_view.set_follow_mode(False)
         self._points.clear()
         self.points_label.setText("Points: 0")
         self.current_label.setText("Current: -")
@@ -331,32 +362,80 @@ class MainWindow(QMainWindow):
         path = self._output_dir / f"simulation_{timestamp}.gpx"
         speed_kmh = float(self.speed_input.value())
         jitter_meters = float(self.jitter_input.value()) if self.mode_combo.currentText() == "Route" else 0.0
-        write_gpx(path, points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
-        simulation_points = build_gpx_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
-
-        if self.bridge_combo.currentText() == "iPhone" and self.mode_combo.currentText() == "Single point":
-            point = points[0]
-            result = self._iphone_bridge.set_location(point.lat, point.lon)
-        else:
-            result = self._bridge.start_location(str(path))
-
-        self._log(result.message)
-        if result.detail:
-            self._log(f"Detail: {result.detail}")
+        timed_points = build_timed_points(points, speed_kmh=speed_kmh, jitter_meters=jitter_meters)
+        simulation_points = [pt for pt, _ in timed_points]
+        threading.Thread(
+            target=write_gpx_from_timed,
+            args=(path, timed_points),
+            daemon=True,
+        ).start()
         self._log(f"GPX: {path}")
-        if result.ok:
-            self._set_running(True)
-            self._start_simulation_marker(simulation_points)
         if jitter_meters > 0:
             self._log(f"Route GPS jitter: up to {jitter_meters:.1f} m")
+
+        self.joystick_timer.stop()
+        self.joystick.reset()
+        self._set_running(True)
+        self._start_simulation_marker(simulation_points)
+
+        if self.bridge_combo.currentText() == "iPhone":
+            self._dispatch_iphone_start(points, simulation_points)
+        else:
+            result = self._bridge.start_location(str(path))
+            self._log(result.message)
+            if result.detail:
+                self._log(f"Detail: {result.detail}")
+            if not result.ok:
+                self._set_running(False)
+
+    def _dispatch_iphone_start(self, points: list[Coordinate], simulation_points: list[Coordinate]) -> None:
+        if self.mode_combo.currentText() == "Single point":
+            point = points[0]
+            self._log(f"Sending location {point.lat:.6f}, {point.lon:.6f} to iPhone…")
+            future = self._iphone_controller.set_location(point.lat, point.lon)
+            op_name = "Set iPhone location"
+        else:
+            self._log(f"Playing route on iPhone ({len(simulation_points)} points)…")
+            future = self._iphone_controller.play_route(simulation_points, tick_seconds=1.0)
+            op_name = "Play iPhone route"
+
+        def callback(f) -> None:
+            try:
+                f.result()
+                self.iphone_op_completed.emit(True, op_name, "")
+            except Exception as exc:
+                self.iphone_op_completed.emit(False, op_name, str(exc))
+
+        future.add_done_callback(callback)
+
+    def _on_iphone_op_completed(self, ok: bool, op_name: str, detail: str) -> None:
+        if ok:
+            self._log(f"{op_name}: OK")
+            return
+
+        self._log(f"{op_name} failed: {detail}")
+        self._set_status("error", "iPhone error — map preview only")
+        QMessageBox.warning(
+            self,
+            op_name,
+            (detail or "Operation failed.")
+            + "\n\nLocal map preview will keep running. Press Stop to clear.",
+        )
 
     def _stop(self) -> None:
         self.simulation_timer.stop()
         self.map_view.stop_current_animation("Stopped")
-        result = self._bridge.stop_location()
-        self._log(result.message)
-        if result.detail:
-            self._log(f"Detail: {result.detail}")
+        self.map_view.set_follow_mode(False)
+
+        if self.bridge_combo.currentText() == "iPhone":
+            self._iphone_controller.stop()
+            self._log("Stopping iPhone simulation…")
+        else:
+            result = self._bridge.stop_location()
+            self._log(result.message)
+            if result.detail:
+                self._log(f"Detail: {result.detail}")
+
         self.current_label.setText("Current: stopped")
         if self._points:
             self.map_view.set_current_position(self._points[-1], "Stopped")
@@ -374,15 +453,6 @@ class MainWindow(QMainWindow):
 
     def _start_tunneld(self) -> None:
         result = start_tunneld_admin(PROJECT_ROOT)
-        self._log(result.message)
-        if result.detail:
-            self._log(f"Detail: {result.detail}")
-        if not result.ok:
-            QMessageBox.warning(self, "tunneld", result.message)
-        self._refresh_tunneld_status()
-
-    def _stop_tunneld(self) -> None:
-        result = stop_tunneld_admin(PROJECT_ROOT)
         self._log(result.message)
         if result.detail:
             self._log(f"Detail: {result.detail}")
@@ -423,10 +493,27 @@ class MainWindow(QMainWindow):
 
         if get_tunneld_pid(PROJECT_ROOT) is not None:
             self._log("tunneld already running; skipping auto-start.")
+            self._warm_up_iphone_connection()
             return
 
         self._log("Auto-starting tunneld (UAC prompt may appear)…")
         self._start_tunneld()
+        QTimer.singleShot(3000, self._warm_up_iphone_connection)
+
+    def _warm_up_iphone_connection(self) -> None:
+        self._log("Pre-warming iPhone DVT connection…")
+        future = self._iphone_controller.warm_up()
+        QTimer.singleShot(0, lambda: None)
+
+        def done(f) -> None:
+            try:
+                f.result()
+                QTimer.singleShot(0, lambda: self._log("Pre-warm: OK (first Start will be instant)."))
+            except Exception as exc:
+                msg = str(exc)
+                QTimer.singleShot(0, lambda: self._log(f"Pre-warm skipped: {msg}"))
+
+        future.add_done_callback(done)
 
     def _refresh_tunneld_status(self) -> None:
         pid = get_tunneld_pid(PROJECT_ROOT)
@@ -460,8 +547,11 @@ class MainWindow(QMainWindow):
         self._show_current_position(points[0], "Simulating")
 
         if self.mode_combo.currentText() == "Route" and len(points) > 1:
+            self.map_view.set_follow_mode(True)
             self.map_view.start_current_animation(points, step_ms=self.simulation_timer.interval())
             self.simulation_timer.start()
+        else:
+            self.map_view.set_follow_mode(True)
 
     def _advance_simulation_marker(self) -> None:
         if not self._simulation_points:
@@ -501,11 +591,84 @@ class MainWindow(QMainWindow):
     def _log(self, message: str) -> None:
         self.log.appendPlainText(f"{datetime.now().strftime('%H:%M:%S')}  {message}")
 
+    def _joystick_direction_changed(self, dx: float, dy: float) -> None:
+        self._joystick_dx = dx
+        self._joystick_dy = dy
+        if dx == 0.0 and dy == 0.0:
+            if self.joystick_timer.isActive():
+                self.joystick_timer.stop()
+            self.map_view.set_follow_mode(False)
+            if self._joystick_position is not None:
+                self._set_status("idle", "Joystick paused")
+            return
+
+        if self.stop_button.isEnabled():
+            self._log("Joystick disabled while simulation is running.")
+            self.joystick.reset()
+            return
+
+        if self._joystick_position is None:
+            if self._points:
+                last = self._points[-1]
+                self._joystick_position = Coordinate(lat=last.lat, lon=last.lon)
+            else:
+                self._joystick_position = Coordinate(lat=24.7808548, lon=121.0252718)
+            self.map_view.set_current_position(self._joystick_position, "Joystick")
+
+        self._set_status("running", "Joystick active")
+        self.map_view.set_follow_mode(True)
+        if not self.joystick_timer.isActive():
+            self.joystick_timer.start()
+
+    def _joystick_tick(self) -> None:
+        if self._joystick_position is None:
+            return
+        dt = self.joystick_timer.interval() / 1000.0
+        speed_mps = float(self.joystick_speed_input.value()) * 1000.0 / 3600.0
+        east_m = self._joystick_dx * speed_mps * dt
+        north_m = self._joystick_dy * speed_mps * dt
+
+        lat = self._joystick_position.lat
+        lon = self._joystick_position.lon
+        lat_offset = north_m / 111_320.0
+        lon_scale = max(0.01, math.cos(math.radians(lat)))
+        lon_offset = east_m / (111_320.0 * lon_scale)
+        new_pos = Coordinate(lat=lat + lat_offset, lon=lon + lon_offset)
+        self._joystick_position = new_pos
+
+        self.current_label.setText(f"Current: {new_pos.lat:.6f}, {new_pos.lon:.6f}")
+        self.map_view.set_current_position(new_pos, "Joystick")
+
+        if self.bridge_combo.currentText() == "iPhone":
+            future = self._iphone_controller.set_location(new_pos.lat, new_pos.lon)
+            future.add_done_callback(self._joystick_iphone_callback)
+
+    def _joystick_iphone_callback(self, future) -> None:
+        exc = future.exception()
+        if exc is not None:
+            msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_joystick_iphone_error(msg))
+
+    def _on_joystick_iphone_error(self, message: str) -> None:
+        if not self.joystick_timer.isActive():
+            return
+        self.joystick_timer.stop()
+        self.joystick.reset()
+        self._log(f"Joystick iPhone error: {message}")
+        self._set_status("error", "iPhone error")
+
     def _set_status(self, state: str, text: str) -> None:
         self.status_label.setText(text)
         self.status_dot.setProperty("state", state)
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        try:
+            self._iphone_controller.shutdown()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 def run() -> None:

@@ -104,6 +104,20 @@
     let currentMarker = null;
     let currentAnimationFrame = null;
     let currentAnimation = null;
+    let followMode = false;
+
+    function maybeFollow(latLng) {
+      if (followMode && currentMarker) {
+        map.panTo(latLng, {animate: false});
+      }
+    }
+
+    window.setFollowMode = function(enabled) {
+      followMode = Boolean(enabled);
+      if (followMode && currentMarker) {
+        map.panTo(currentMarker.getLatLng(), {animate: false});
+      }
+    };
 
     const currentIcon = L.divIcon({
       className: 'current-position-marker',
@@ -163,6 +177,7 @@
       }
       currentMarker.bindTooltip(status || 'Current', {permanent: true, direction: 'right', offset: [12, 0]});
       currentMarker.openTooltip();
+      maybeFollow(latLng);
     };
 
     window.startCurrentAnimation = function(points, stepMs) {
@@ -220,7 +235,9 @@
       const end = points[index + 1];
       const lat = start.lat + (end.lat - start.lat) * t;
       const lon = start.lon + (end.lon - start.lon) * t;
-      currentMarker.setLatLng([lat, lon]);
+      const latLng = [lat, lon];
+      currentMarker.setLatLng(latLng);
+      maybeFollow(latLng);
 
       currentAnimationFrame = requestAnimationFrame(animateCurrentPosition);
     }
