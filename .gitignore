@@ -1,6 +1,10 @@
-.venv/
-.idea/
+dist/
+build/
 output/
-__pycache__/
-.pytest_cache/
-*.pyc
+.idea/
+.vscode/
+*.exe
+*.dll
+*.test
+*.out
+coverage.txt
