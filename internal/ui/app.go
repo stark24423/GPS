@@ -128,9 +128,9 @@ func (a *Application) buildControls() {
 	a.pointsLabel = widget.NewLabel("Points: 0")
 	a.currentLabel = widget.NewLabel("Current: -")
 	a.deviceLabel = widget.NewLabel("Device: no iPhone detected")
-	a.deviceLabel.Wrapping = fyne.TextWrapWord
+	a.deviceLabel.Truncation = fyne.TextTruncateEllipsis
 	a.tunnelLabel = widget.NewLabel("Tunnel: built-in Go tunnel not started")
-	a.tunnelLabel.Wrapping = fyne.TextWrapWord
+	a.tunnelLabel.Truncation = fyne.TextTruncateEllipsis
 
 	a.modeSelect = widget.NewSelect([]string{modeSingle, modeRoute}, func(value string) {
 		if value == modeSingle {
@@ -203,7 +203,7 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	mapHeader := container.NewBorder(nil, nil,
 		widget.NewLabelWithStyle("Map", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		mapToolbar,
-		widget.NewLabel("Click to add a point. Drag to pan."),
+		widget.NewLabel("Click to add a point. Drag to pan. Scroll to zoom."),
 	)
 	mapArea := container.NewBorder(mapHeader, nil, nil, nil, a.mapView)
 
@@ -218,12 +218,17 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	}
 	joystick := NewJoystick(a.onJoystickDirection)
 
-	statusRow := container.NewHBox(container.NewGridWrap(fyne.NewSize(12, 12), a.statusDot), a.statusLabel)
-	statusCard := widget.NewCard("Run Status", "", container.NewVBox(
-		statusRow,
+	statusRow := container.NewHBox(statusDotCell(a.statusDot, a.statusLabel), a.statusLabel)
+	topInfo := container.NewVBox(
+		container.NewPadded(container.NewGridWithColumns(5,
+			infoPill("Status", statusRow),
+			infoValue(a.pointsLabel),
+			infoValue(a.currentLabel),
+			infoValue(a.deviceLabel),
+			infoValue(a.tunnelLabel),
+		)),
 		widget.NewSeparator(),
-		container.NewGridWithColumns(1, a.pointsLabel, a.currentLabel),
-	))
+	)
 
 	simulationForm := widget.NewForm(
 		widget.NewFormItem("Mode", a.modeSelect),
@@ -231,23 +236,21 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 		widget.NewFormItem("Route speed", valueSlider(a.speedSlider, a.speedLabel)),
 		widget.NewFormItem("Jitter", valueSlider(a.jitterSlider, a.jitterLabel)),
 	)
-	simulationCard := widget.NewCard("Simulation Setup", "", container.NewVBox(
+	simulationSection := compactSection("Simulation", container.NewVBox(
 		simulationForm,
 		container.NewGridWithColumns(2, a.startButton, a.stopButton),
 	))
 
-	joystickCard := widget.NewCard("Manual Movement", "", container.NewVBox(
-		container.NewCenter(joystick),
+	joystickSection := compactSection("Manual Movement", container.NewVBox(
+		container.NewCenter(container.NewGridWrap(fyne.NewSize(104, 104), joystick)),
 		widget.NewForm(widget.NewFormItem("Joystick speed", valueSlider(joystickSpeedSlider, a.joystickSpeedLabel))),
 	))
 
 	deviceForm := widget.NewForm(
 		widget.NewFormItem("Device", a.deviceSelect),
 	)
-	deviceCard := widget.NewCard("iPhone Connection", "", container.NewVBox(
+	deviceSection := compactSection("iPhone Connection", container.NewVBox(
 		deviceForm,
-		a.deviceLabel,
-		a.tunnelLabel,
 		container.NewGridWithColumns(1, a.refreshButton),
 	))
 
@@ -255,32 +258,61 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.FolderOpenIcon(), a.openOutputFolder),
 		widget.NewToolbarAction(theme.InfoIcon(), a.openLogWindow),
 	)
-	utilityCard := widget.NewCard("Utilities", "", container.NewVBox(
+	utilitySection := compactSection("Utilities", container.NewVBox(
 		container.NewGridWithColumns(2, a.undoButton, a.clearButton),
 		utilityToolbar,
 	))
 
 	sideContent := container.NewVBox(
 		widget.NewLabelWithStyle("GPS Simulator", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		statusCard,
-		simulationCard,
-		joystickCard,
-		deviceCard,
-		utilityCard,
+		widget.NewSeparator(),
+		simulationSection,
+		joystickSection,
+		deviceSection,
+		utilitySection,
 	)
 	sideScroll := container.NewVScroll(container.NewPadded(sideContent))
-	sideScroll.SetMinSize(fyne.NewSize(360, 620))
+	sideScroll.SetMinSize(fyne.NewSize(340, 620))
 	side := container.NewBorder(nil, nil, nil, nil, sideScroll)
 
 	split := container.NewHSplit(mapArea, side)
-	split.Offset = 0.70
-	return split
+	split.Offset = 0.72
+	return container.NewBorder(topInfo, nil, nil, nil, split)
 }
 
 func valueSlider(slider *widget.Slider, valueLabel *widget.Label) fyne.CanvasObject {
 	valueLabel.Alignment = fyne.TextAlignTrailing
 	valueLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	return container.NewBorder(nil, nil, nil, valueLabel, slider)
+}
+
+func compactSection(title string, content fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewVBox(
+		widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewSeparator(),
+		content,
+	)
+}
+
+func infoPill(title string, content fyne.CanvasObject) fyne.CanvasObject {
+	titleLabel := widget.NewLabel(title + ":")
+	titleLabel.TextStyle = fyne.TextStyle{Bold: true}
+	return container.NewHBox(titleLabel, content)
+}
+
+func infoValue(content fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewHBox(content)
+}
+
+func statusDotCell(dot *canvas.Circle, label *widget.Label) fyne.CanvasObject {
+	height := label.MinSize().Height
+	if height < 18 {
+		height = 18
+	}
+	return container.NewGridWrap(
+		fyne.NewSize(12, height),
+		container.NewCenter(container.NewGridWrap(fyne.NewSize(12, 12), dot)),
+	)
 }
 
 func (a *Application) addPoint(point core.Coordinate) {

@@ -18,7 +18,11 @@ import (
 	"gpssim/internal/core"
 )
 
-const tileSize = 256
+const (
+	tileSize = 256
+	minZoom  = 2
+	maxZoom  = 19
+)
 
 type tileKey struct {
 	Z int
@@ -110,7 +114,7 @@ func (m *MapWidget) SetFollowMode(enabled bool) {
 
 func (m *MapWidget) ZoomIn() {
 	m.mu.Lock()
-	if m.zoom < 19 {
+	if m.zoom < maxZoom {
 		m.zoom++
 	}
 	m.mu.Unlock()
@@ -119,11 +123,19 @@ func (m *MapWidget) ZoomIn() {
 
 func (m *MapWidget) ZoomOut() {
 	m.mu.Lock()
-	if m.zoom > 2 {
+	if m.zoom > minZoom {
 		m.zoom--
 	}
 	m.mu.Unlock()
 	m.Refresh()
+}
+
+func (m *MapWidget) Scrolled(event *fyne.ScrollEvent) {
+	if event.Scrolled.DY == 0 {
+		return
+	}
+
+	m.zoomAt(event.Position, m.Size(), event.Scrolled.DY > 0)
 }
 
 func (m *MapWidget) Tapped(event *fyne.PointEvent) {
@@ -149,6 +161,37 @@ func (m *MapWidget) Dragged(event *fyne.DragEvent) {
 }
 
 func (m *MapWidget) DragEnd() {}
+
+func (m *MapWidget) zoomAt(pos fyne.Position, size fyne.Size, zoomIn bool) {
+	m.mu.Lock()
+	oldZoom := m.zoom
+	newZoom := oldZoom
+	if zoomIn && newZoom < maxZoom {
+		newZoom++
+	}
+	if !zoomIn && newZoom > minZoom {
+		newZoom--
+	}
+	if newZoom == oldZoom {
+		m.mu.Unlock()
+		return
+	}
+
+	centerX, centerY := latLonToWorld(m.center.Lat, m.center.Lon, oldZoom)
+	anchorX := centerX + float64(pos.X-size.Width/2)
+	anchorY := centerY + float64(pos.Y-size.Height/2)
+	anchorLat, anchorLon := worldToLatLon(anchorX, anchorY, oldZoom)
+
+	nextAnchorX, nextAnchorY := latLonToWorld(anchorLat, anchorLon, newZoom)
+	nextCenterX := nextAnchorX - float64(pos.X-size.Width/2)
+	nextCenterY := nextAnchorY - float64(pos.Y-size.Height/2)
+	lat, lon := worldToLatLon(nextCenterX, nextCenterY, newZoom)
+
+	m.center = core.Coordinate{Lat: lat, Lon: lon}
+	m.zoom = newZoom
+	m.mu.Unlock()
+	m.Refresh()
+}
 
 func (m *MapWidget) CreateRenderer() fyne.WidgetRenderer {
 	raster := canvas.NewRaster(func(width, height int) image.Image {
