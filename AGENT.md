@@ -265,3 +265,39 @@ dist/
 - 自研 tunnel 尚未完成前，不要宣稱 iPhone 模式已完整可用。
 - 若某個 protocol 分支尚未實作，請回傳明確 `unsupported` 或 `not implemented` 錯誤。
 - 不要重新引入 `go-ios/ios/simlocation` 作為正式 iPhone bridge；若短期用來對照測試，請隔離在測試或 debug helper，不要接進正式流程。
+
+## Encoding / UTF-8 Policy
+
+本專案統一使用 UTF-8 編碼，避免繁體中文註解、README、AGENT.md、log 文字在 PowerShell、GoLand、Git diff 或 Codex 讀取時變成亂碼。
+
+### 每次開 PowerShell 先執行
+
+```powershell
+chcp 65001 > $null
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new()
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+```
+
+### Codex / Agent 工作規則
+
+- 開始工作前先假設 shell 可能不是 UTF-8，執行上面的 PowerShell UTF-8 初始化命令。
+- 新增或修改文字檔時一律以 UTF-8 儲存，不使用 Big5、ANSI、系統預設 code page。
+- 程式碼註解可以使用繁體中文，但必須確保檔案仍是 UTF-8。
+- 若發現既有檔案已經亂碼，不要直接猜測修復內容；先保留原檔，再只對需要修改的區塊做明確變更。
+- PowerShell 讀取中文檔案時優先使用：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 <path>
+```
+
+- PowerShell 寫入中文檔案時優先使用：
+
+```powershell
+Set-Content -Encoding UTF8 <path> <content>
+```
+
+### Git / IDE 建議
+
+- GoLand / JetBrains 專案編碼設定請使用 `UTF-8`。
+- Git commit 前若看到中文 diff 變亂碼，先檢查 shell code page 與檔案 encoding，不要把亂碼當成正常內容提交。

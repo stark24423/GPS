@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
@@ -34,6 +36,7 @@ const (
 type Application struct {
 	app    fyne.App
 	window fyne.Window
+	logWin fyne.Window
 
 	mapView *MapWidget
 	bridge  *iosbridge.Bridge
@@ -54,16 +57,18 @@ type Application struct {
 	currentLabel *widget.Label
 	deviceLabel  *widget.Label
 	tunnelLabel  *widget.Label
-	logEntry     *widget.Entry
+	logLabel     *widget.Label
 
 	startButton       *widget.Button
 	stopButton        *widget.Button
 	clearButton       *widget.Button
 	undoButton        *widget.Button
 	outputButton      *widget.Button
+	logButton         *widget.Button
 	refreshButton     *widget.Button
 	tunnelStartButton *widget.Button
 	tunnelStopButton  *widget.Button
+	statusDot         *canvas.Circle
 
 	stateMu          sync.Mutex
 	points           []core.Coordinate
@@ -74,10 +79,13 @@ type Application struct {
 	joystickDY       float64
 	joystickPosition *core.Coordinate
 	deviceChoices    map[string]string
+	logMu            sync.Mutex
 	logLines         []string
 
 	joystickSendInFlight atomic.Bool
+	tunnelStartInFlight  atomic.Bool
 	outputDir            string
+	logFilePath          string
 }
 
 func Run() {
@@ -88,7 +96,7 @@ func Run() {
 func NewApplication() *Application {
 	fyneApp := app.NewWithID("gpssim.go")
 	window := fyneApp.NewWindow("GPS Simulator")
-	window.Resize(fyne.NewSize(1120, 720))
+	window.Resize(fyne.NewSize(1280, 760))
 
 	root := resolveProjectRoot()
 	a := &Application{
@@ -99,10 +107,12 @@ func NewApplication() *Application {
 		deviceChoices: make(map[string]string),
 		joystickSpeed: 20,
 	}
+	a.logFilePath = filepath.Join(a.outputDir, "gps-simulator.log")
 
 	a.mapView = NewMapWidget(a.addPoint)
 	a.buildControls()
 	a.window.SetContent(a.buildLayout())
+	a.bridge.SetLogger(a.logf)
 	a.stopButton.Disable()
 	a.refreshDevices()
 	a.logRequirements()
@@ -113,6 +123,8 @@ func NewApplication() *Application {
 
 func (a *Application) buildControls() {
 	a.statusLabel = widget.NewLabel("Idle")
+	a.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
+	a.statusDot = canvas.NewCircle(statusIdleColor())
 	a.pointsLabel = widget.NewLabel("Points: 0")
 	a.currentLabel = widget.NewLabel("Current: -")
 	a.deviceLabel = widget.NewLabel("Device: no iPhone detected")
@@ -138,6 +150,11 @@ func (a *Application) buildControls() {
 		if udid, ok := a.deviceChoices[label]; ok {
 			a.bridge.SetUDID(udid)
 			a.logf("Selected device: %s", label)
+			if a.bridgeSelect.Selected != bridgeIPhone {
+				a.bridgeSelect.SetSelected(bridgeIPhone)
+				return
+			}
+			a.startTunnelForSelected(false)
 		}
 	})
 	a.deviceSelect.PlaceHolder = "Default device"
@@ -167,22 +184,28 @@ func (a *Application) buildControls() {
 	a.clearButton = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), a.clearPoints)
 	a.undoButton = widget.NewButtonWithIcon("Undo", theme.NavigateBackIcon(), a.removeLastPoint)
 	a.outputButton = widget.NewButtonWithIcon("Output", theme.FolderOpenIcon(), a.openOutputFolder)
+	a.logButton = widget.NewButtonWithIcon("Logs", theme.InfoIcon(), a.openLogWindow)
 	a.refreshButton = widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), a.refreshDevices)
 	a.tunnelStartButton = widget.NewButtonWithIcon("Start Tunnel", theme.MediaPlayIcon(), a.startTunnel)
 	a.tunnelStopButton = widget.NewButtonWithIcon("Stop Tunnel", theme.MediaStopIcon(), a.stopTunnel)
 
-	a.logEntry = widget.NewMultiLineEntry()
-	a.logEntry.Disable()
-	a.logEntry.Wrapping = fyne.TextWrapWord
+	a.logLabel = widget.NewLabel("")
+	a.logLabel.Wrapping = fyne.TextWrapWord
 
 	a.window.SetMaster()
 }
 
 func (a *Application) buildLayout() fyne.CanvasObject {
-	zoomIn := widget.NewButtonWithIcon("", theme.ZoomInIcon(), a.mapView.ZoomIn)
-	zoomOut := widget.NewButtonWithIcon("", theme.ZoomOutIcon(), a.mapView.ZoomOut)
-	mapTools := container.NewHBox(zoomIn, zoomOut)
-	mapArea := container.NewBorder(mapTools, nil, nil, nil, a.mapView)
+	mapToolbar := widget.NewToolbar(
+		widget.NewToolbarAction(theme.ZoomInIcon(), a.mapView.ZoomIn),
+		widget.NewToolbarAction(theme.ZoomOutIcon(), a.mapView.ZoomOut),
+	)
+	mapHeader := container.NewBorder(nil, nil,
+		widget.NewLabelWithStyle("Map", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		mapToolbar,
+		widget.NewLabel("Click to add a point. Drag to pan."),
+	)
+	mapArea := container.NewBorder(mapHeader, nil, nil, nil, a.mapView)
 
 	joystickSpeedSlider := widget.NewSlider(0.1, 500)
 	joystickSpeedSlider.Step = 0.5
@@ -195,51 +218,69 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	}
 	joystick := NewJoystick(a.onJoystickDirection)
 
-	statusCard := widget.NewCard("Status", "", container.NewVBox(
-		a.statusLabel,
-		a.pointsLabel,
-		a.currentLabel,
+	statusRow := container.NewHBox(container.NewGridWrap(fyne.NewSize(12, 12), a.statusDot), a.statusLabel)
+	statusCard := widget.NewCard("Run Status", "", container.NewVBox(
+		statusRow,
+		widget.NewSeparator(),
+		container.NewGridWithColumns(1, a.pointsLabel, a.currentLabel),
 	))
-	settingsCard := widget.NewCard("Settings", "", container.NewVBox(
-		widget.NewForm(
-			widget.NewFormItem("Mode", a.modeSelect),
-			widget.NewFormItem("Bridge", a.bridgeSelect),
-			widget.NewFormItem("Speed", container.NewBorder(nil, nil, nil, a.speedLabel, a.speedSlider)),
-			widget.NewFormItem("Jitter", container.NewBorder(nil, nil, nil, a.jitterLabel, a.jitterSlider)),
-		),
+
+	simulationForm := widget.NewForm(
+		widget.NewFormItem("Mode", a.modeSelect),
+		widget.NewFormItem("Bridge", a.bridgeSelect),
+		widget.NewFormItem("Route speed", valueSlider(a.speedSlider, a.speedLabel)),
+		widget.NewFormItem("Jitter", valueSlider(a.jitterSlider, a.jitterLabel)),
+	)
+	simulationCard := widget.NewCard("Simulation Setup", "", container.NewVBox(
+		simulationForm,
+		container.NewGridWithColumns(2, a.startButton, a.stopButton),
 	))
-	joystickCard := widget.NewCard("Joystick", "", container.NewVBox(
+
+	joystickCard := widget.NewCard("Manual Movement", "", container.NewVBox(
 		container.NewCenter(joystick),
-		widget.NewForm(widget.NewFormItem("Speed", container.NewBorder(nil, nil, nil, a.joystickSpeedLabel, joystickSpeedSlider))),
+		widget.NewForm(widget.NewFormItem("Joystick speed", valueSlider(joystickSpeedSlider, a.joystickSpeedLabel))),
 	))
-	deviceCard := widget.NewCard("iPhone", "", container.NewVBox(
+
+	deviceForm := widget.NewForm(
+		widget.NewFormItem("Device", a.deviceSelect),
+	)
+	deviceCard := widget.NewCard("iPhone Connection", "", container.NewVBox(
+		deviceForm,
 		a.deviceLabel,
-		a.deviceSelect,
 		a.tunnelLabel,
-		container.NewGridWithColumns(2, a.tunnelStartButton, a.tunnelStopButton),
-		a.refreshButton,
+		container.NewGridWithColumns(1, a.refreshButton),
 	))
 
-	actions := container.NewGridWithColumns(2, a.startButton, a.stopButton)
-	tools := container.NewGridWithColumns(3, a.undoButton, a.clearButton, a.outputButton)
-	logBox := container.NewVScroll(a.logEntry)
-	logBox.SetMinSize(fyne.NewSize(280, 140))
+	utilityToolbar := widget.NewToolbar(
+		widget.NewToolbarAction(theme.FolderOpenIcon(), a.openOutputFolder),
+		widget.NewToolbarAction(theme.InfoIcon(), a.openLogWindow),
+	)
+	utilityCard := widget.NewCard("Utilities", "", container.NewVBox(
+		container.NewGridWithColumns(2, a.undoButton, a.clearButton),
+		utilityToolbar,
+	))
 
-	side := container.NewBorder(nil, nil, nil, nil, container.NewVScroll(container.NewVBox(
+	sideContent := container.NewVBox(
 		widget.NewLabelWithStyle("GPS Simulator", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		statusCard,
-		settingsCard,
+		simulationCard,
 		joystickCard,
 		deviceCard,
-		actions,
-		tools,
-		widget.NewLabel("Log"),
-		logBox,
-	)))
+		utilityCard,
+	)
+	sideScroll := container.NewVScroll(container.NewPadded(sideContent))
+	sideScroll.SetMinSize(fyne.NewSize(360, 620))
+	side := container.NewBorder(nil, nil, nil, nil, sideScroll)
 
 	split := container.NewHSplit(mapArea, side)
-	split.Offset = 0.74
+	split.Offset = 0.70
 	return split
+}
+
+func valueSlider(slider *widget.Slider, valueLabel *widget.Label) fyne.CanvasObject {
+	valueLabel.Alignment = fyne.TextAlignTrailing
+	valueLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	return container.NewBorder(nil, nil, nil, valueLabel, slider)
 }
 
 func (a *Application) addPoint(point core.Coordinate) {
@@ -384,6 +425,7 @@ func (a *Application) start() {
 	}
 
 	a.logf("Dry-run complete. GPX was generated, but no iPhone location was changed.")
+	a.setStatus("GPX generated")
 }
 
 func (a *Application) startIPhoneOperation(points, simulationPoints []core.Coordinate) {
@@ -391,7 +433,7 @@ func (a *Application) startIPhoneOperation(points, simulationPoints []core.Coord
 		point := points[0]
 		a.logf("Sending location %.6f, %.6f to iPhone.", point.Lat, point.Lon)
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			err := a.bridge.SetLocation(ctx, point)
 			a.finishIPhoneOperation("Set iPhone location", err)
@@ -410,15 +452,29 @@ func (a *Application) finishIPhoneOperation(name string, err error) {
 	fyne.Do(func() {
 		if err == nil {
 			a.logf("%s: OK", name)
+			a.setStatus(name + " OK")
 			return
 		}
 		if errorsIsCanceled(err) {
 			a.logf("%s: stopped", name)
 			return
 		}
+		if iosbridge.IsLocationSimulationPending(err) {
+			a.stopPreview()
+			a.setRunning(false)
+			a.setStatus("Tunnel ready - location pending")
+			a.logf("%s pending: tunnel discovery succeeded, but DVT LocationSimulation is not implemented yet.", name)
+			a.openLogWindow()
+			dialog.ShowInformation(
+				"Tunnel discovery ready",
+				"目前程式會自動管理 iPhone tunnel。請打開 Logs 查看 RSD 位址與 debug log。",
+				a.window,
+			)
+			return
+		}
 		a.logf("%s failed: %s", name, err)
 		a.setStatus("iPhone error")
-		dialog.ShowError(fmt.Errorf("%s failed: %w", name, err), a.window)
+		dialog.ShowError(fmt.Errorf("%s failed: %s\n\nFull log: %s", name, compactError(err), a.logFilePath), a.window)
 	})
 }
 
@@ -431,13 +487,17 @@ func (a *Application) stop() {
 			fyne.Do(func() {
 				if err != nil {
 					a.logf("Stopping iPhone simulation failed: %s", err)
+					a.setStatus("Stop failed")
 				} else {
-					a.logf("Stopping iPhone simulation: OK")
+					a.logf("Stopping iPhone simulation: location cleared; tunnel kept running")
+					a.refreshTunnelStatus()
+					a.setStatus("Location cleared")
 				}
 			})
 		}()
 	} else {
 		a.logf("Dry-run stop complete. No iPhone location was changed.")
+		a.setStatus("Stopped")
 	}
 
 	a.currentLabel.SetText("Current: stopped")
@@ -598,7 +658,7 @@ func (a *Application) joystickTick() {
 
 	if a.bridgeSelect.Selected == bridgeIPhone && a.joystickSendInFlight.CompareAndSwap(false, true) {
 		go func(point core.Coordinate) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			err := a.bridge.SetLocation(ctx, point)
 			a.joystickSendInFlight.Store(false)
@@ -616,18 +676,21 @@ func (a *Application) joystickTick() {
 func (a *Application) refreshDevices() {
 	a.refreshButton.Disable()
 	a.deviceLabel.SetText("Device: scanning...")
+	a.setStatus("Scanning iPhone...")
 	go func() {
 		devices, err := a.bridge.ListDevices()
 		fyne.Do(func() {
 			a.refreshButton.Enable()
 			if err != nil {
 				a.deviceLabel.SetText("Device: scan failed")
+				a.setStatus("Device scan failed")
 				a.logf("iPhone scan failed: %s", err)
 				return
 			}
 			if len(devices) == 0 {
 				a.deviceLabel.SetText("Device: no iPhone detected")
 				a.tunnelLabel.SetText("Tunnel: no selected iPhone")
+				a.setStatus("No iPhone detected")
 				a.deviceSelect.Options = nil
 				a.deviceSelect.ClearSelected()
 				a.deviceSelect.Refresh()
@@ -650,36 +713,84 @@ func (a *Application) refreshDevices() {
 			a.logf("Detected device(s): %s", strings.Join(labels, ", "))
 			if a.bridgeSelect.Selected == bridgeDryRun {
 				a.bridgeSelect.SetSelected(bridgeIPhone)
+			} else {
+				a.setStatus("iPhone ready")
 			}
 		})
 	}()
 }
 
 func (a *Application) startTunnel() {
+	a.startTunnelForSelected(true)
+}
+
+func (a *Application) startTunnelForSelected(showDialog bool) {
 	if a.bridge.UDID() == "" {
-		dialog.ShowInformation("Missing iPhone", "Select an iPhone before starting the tunnel.", a.window)
+		if showDialog {
+			dialog.ShowInformation("Missing iPhone", "Select an iPhone before starting the tunnel.", a.window)
+		}
 		return
+	}
+	if a.tunnelStartInFlight.Swap(true) {
+		a.logf("Tunnel start already in progress.")
+		return
+	}
+	if a.selectedTunnelActive() {
+		a.tunnelStartInFlight.Store(false)
+		a.refreshTunnelStatus()
+		a.logf("Tunnel already active for selected iPhone.")
+		return
+	}
+	if showDialog {
+		a.openLogWindow()
 	}
 	a.tunnelStartButton.Disable()
 	a.tunnelLabel.SetText("Tunnel: starting...")
-	a.logf("Starting built-in Go tunnel.")
+	a.setStatus("Starting tunnel...")
+	a.logf("Starting built-in Go tunnel for selected iPhone.")
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		info, err := a.bridge.StartTunnel(ctx)
 		fyne.Do(func() {
+			a.tunnelStartInFlight.Store(false)
 			a.tunnelStartButton.Enable()
 			if err != nil {
 				a.tunnelLabel.SetText("Tunnel: " + err.Error())
+				a.setStatus("Tunnel error")
 				a.logf("Start tunnel failed: %s", err)
-				dialog.ShowError(err, a.window)
+				if showDialog {
+					dialog.ShowError(err, a.window)
+				}
 				return
 			}
 			a.tunnelLabel.SetText(fmt.Sprintf("Tunnel: %s %s:%d", info.State, info.RSDAddress, info.RSDPort))
-			a.logf("Tunnel started: %+v", info)
+			a.setStatus("Tunnel ready")
+			a.logf("Tunnel discovery result: udid=%s interface=%s state=%s rsd=%s:%d mtu=%d message=%s",
+				info.UDID,
+				info.InterfaceName,
+				info.State,
+				info.RSDAddress,
+				info.RSDPort,
+				info.MTU,
+				info.Message,
+			)
 		})
 	}()
+}
+
+func (a *Application) selectedTunnelActive() bool {
+	udid := a.bridge.UDID()
+	if udid == "" {
+		return false
+	}
+	for _, info := range a.bridge.TunnelStatus() {
+		if info.UDID == udid {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Application) stopTunnel() {
@@ -695,6 +806,7 @@ func (a *Application) stopTunnel() {
 				return
 			}
 			a.tunnelLabel.SetText("Tunnel: stopped")
+			a.setStatus("Tunnel stopped")
 			a.logf("Tunnel stopped.")
 		})
 	}()
@@ -774,17 +886,78 @@ func (a *Application) setRunning(running bool) {
 
 func (a *Application) setStatus(status string) {
 	a.statusLabel.SetText(status)
+	if a.statusDot != nil {
+		a.statusDot.FillColor = statusColor(status)
+		a.statusDot.Refresh()
+	}
+}
+
+func statusColor(status string) color.Color {
+	normalized := strings.ToLower(status)
+	switch {
+	case strings.Contains(normalized, "error"), strings.Contains(normalized, "failed"):
+		return color.NRGBA{R: 220, G: 38, B: 38, A: 255}
+	case strings.Contains(normalized, "starting"), strings.Contains(normalized, "scanning"), strings.Contains(normalized, "running"), strings.Contains(normalized, "active"):
+		return color.NRGBA{R: 37, G: 99, B: 235, A: 255}
+	case strings.Contains(normalized, "warn"), strings.Contains(normalized, "pending"), strings.Contains(normalized, "no iphone"), strings.Contains(normalized, "stopped"):
+		return color.NRGBA{R: 217, G: 119, B: 6, A: 255}
+	case strings.Contains(normalized, "ready"), strings.Contains(normalized, "ok"), strings.Contains(normalized, "arrived"):
+		return color.NRGBA{R: 22, G: 163, B: 74, A: 255}
+	default:
+		return statusIdleColor()
+	}
+}
+
+func statusIdleColor() color.Color {
+	return color.NRGBA{R: 100, G: 116, B: 139, A: 255}
 }
 
 func (a *Application) logf(format string, args ...interface{}) {
 	line := fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	a.writeLogLine(line)
 	fyne.Do(func() {
+		a.logMu.Lock()
+		defer a.logMu.Unlock()
 		a.logLines = append(a.logLines, line)
 		if len(a.logLines) > 500 {
 			a.logLines = a.logLines[len(a.logLines)-500:]
 		}
-		a.logEntry.SetText(strings.Join(a.logLines, "\n"))
+		a.logLabel.SetText(strings.Join(a.logLines, "\n"))
 	})
+}
+
+func (a *Application) writeLogLine(line string) {
+	a.logMu.Lock()
+	defer a.logMu.Unlock()
+	if err := os.MkdirAll(a.outputDir, 0755); err != nil {
+		return
+	}
+	file, err := os.OpenFile(a.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.WriteString(line + "\n")
+}
+
+func (a *Application) openLogWindow() {
+	if a.logWin == nil {
+		a.logWin = a.app.NewWindow("GPS Simulator Logs")
+		a.logWin.Resize(fyne.NewSize(760, 460))
+		a.logWin.SetCloseIntercept(func() {
+			a.logWin.Hide()
+		})
+		logBox := container.NewVScroll(a.logLabel)
+		logBox.SetMinSize(fyne.NewSize(740, 420))
+		clearButton := widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), func() {
+			a.logMu.Lock()
+			defer a.logMu.Unlock()
+			a.logLines = nil
+			a.logLabel.SetText("")
+		})
+		a.logWin.SetContent(container.NewBorder(nil, container.NewHBox(clearButton), nil, nil, logBox))
+	}
+	a.logWin.Show()
 }
 
 func resolveProjectRoot() string {
@@ -800,4 +973,15 @@ func resolveProjectRoot() string {
 
 func errorsIsCanceled(err error) bool {
 	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+func compactError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := strings.Join(strings.Fields(err.Error()), " ")
+	if len(text) <= 320 {
+		return text
+	}
+	return text[:320] + "..."
 }

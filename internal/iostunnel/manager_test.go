@@ -24,7 +24,8 @@ func TestVersionAtLeast(t *testing.T) {
 
 func TestStopClearsStatus(t *testing.T) {
 	m := NewManager()
-	m.active["abc"] = TunnelInfo{UDID: "abc"}
+	m.active["abc"] = &activeTunnel{info: TunnelInfo{UDID: "abc"}, done: make(chan struct{})}
+	close(m.active["abc"].done)
 	if err := m.Stop("abc"); err != nil {
 		t.Fatal(err)
 	}

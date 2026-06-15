@@ -2,11 +2,13 @@ package lockdown
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 
+	"gpssim/internal/ioscore/pairrecord"
 	"gpssim/internal/ioscore/plist"
 	"gpssim/internal/ioscore/usbmux"
 )
@@ -14,7 +16,11 @@ import (
 const coreDeviceProxyService = "com.apple.internal.devicecompute.CoreDeviceProxy"
 
 type Client struct {
-	conn io.ReadWriteCloser
+	conn      io.ReadWriteCloser
+	ctx       context.Context
+	mux       *usbmux.Client
+	device    usbmux.Device
+	sessionID string
 }
 
 type DeviceValues struct {
@@ -28,7 +34,7 @@ func Dial(ctx context.Context, mux *usbmux.Client, device usbmux.Device) (*Clien
 	if err != nil {
 		return nil, err
 	}
-	return &Client{conn: conn}, nil
+	return &Client{conn: conn, ctx: ctx, mux: mux, device: device}, nil
 }
 
 func New(conn io.ReadWriteCloser) *Client {
@@ -36,6 +42,12 @@ func New(conn io.ReadWriteCloser) *Client {
 }
 
 func (c *Client) Close() error {
+	if c.sessionID != "" {
+		_ = WritePacket(c.conn, plist.Dict{
+			"Request":   "StopSession",
+			"SessionID": c.sessionID,
+		})
+	}
 	return c.conn.Close()
 }
 
@@ -69,23 +81,87 @@ func (c *Client) GetValue(domain, key string) (any, error) {
 }
 
 func (c *Client) StartCoreDeviceProxy() (net.Conn, error) {
+	if err := c.StartSession(); err != nil {
+		return nil, err
+	}
+	return c.StartService(coreDeviceProxyService)
+}
+
+func (c *Client) StartSession() error {
+	record, err := pairrecord.Read(c.device.SerialNumber)
+	if err != nil {
+		return err
+	}
+	response, err := c.RoundTrip(plist.Dict{
+		"Request":         "StartSession",
+		"Label":           "gpssim-go",
+		"HostID":          record.HostID,
+		"SystemBUID":      record.SystemBUID,
+		"ProtocolVersion": "2",
+	})
+	if err != nil {
+		return err
+	}
+	if errText := plist.String(response, "Error"); errText != "" {
+		return fmt.Errorf("start lockdown session: %s", errText)
+	}
+	c.sessionID = plist.String(response, "SessionID")
+	if enabled, _ := response["EnableSessionSSL"].(bool); enabled {
+		tlsConn, err := createTLSClient(assertNetConn(c.conn), record)
+		if err != nil {
+			return fmt.Errorf("lockdown TLS handshake: %w", err)
+		}
+		c.conn = tlsConn
+	}
+	if c.sessionID == "" {
+		return fmt.Errorf("start lockdown session did not return SessionID")
+	}
+	return nil
+}
+
+func (c *Client) StartService(service string) (net.Conn, error) {
+	if c.mux == nil {
+		return nil, fmt.Errorf("lockdown client was not created with usbmux context")
+	}
 	response, err := c.RoundTrip(plist.Dict{
 		"Request": "StartService",
-		"Service": coreDeviceProxyService,
+		"Label":   "gpssim-go",
+		"Service": service,
 	})
 	if err != nil {
 		return nil, err
 	}
 	if errText := plist.String(response, "Error"); errText != "" {
-		return nil, fmt.Errorf("start %s: %s", coreDeviceProxyService, errText)
+		return nil, fmt.Errorf("start %s: %s", service, errText)
 	}
-	// For usbmux lockdown services, the existing connection becomes the service stream.
-	// Some lockdownd variants instead return a port; that path can be added once validated
-	// against hardware traces.
-	if plist.Int(response, "Port") == 0 && plist.Int(response, "PortNumber") == 0 {
-		return nil, fmt.Errorf("start %s did not return a service port", coreDeviceProxyService)
+	port := plist.Int(response, "Port")
+	if port == 0 {
+		port = plist.Int(response, "PortNumber")
 	}
-	return nil, fmt.Errorf("CoreDeviceProxy service stream handoff is not implemented for raw usbmux yet")
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("start %s did not return a valid service port", service)
+	}
+
+	// StartService 只回報服務所在 port；真正的服務資料流需要另外開一條 usbmux connection。
+	// 若服務要求 SSL，必須先完成 TLS handshake，再交給上層 protocol 使用。
+	serviceConn, err := c.mux.ConnectPort(c.ctx, c.device, uint16(port))
+	if err != nil {
+		return nil, err
+	}
+	if enabled, _ := response["EnableServiceSSL"].(bool); enabled {
+		record, err := pairrecord.Read(c.device.SerialNumber)
+		if err != nil {
+			serviceConn.Close()
+			return nil, err
+		}
+		tlsConn, err := createTLSClient(serviceConn, record)
+		if err != nil {
+			serviceConn.Close()
+			return nil, fmt.Errorf("service TLS handshake for %s: %w", service, err)
+		}
+		return tlsConn, nil
+	}
+	return serviceConn, nil
 }
 
 func (c *Client) RoundTrip(request plist.Dict) (plist.Dict, error) {
@@ -126,4 +202,27 @@ func ReadPacket(r io.Reader) (plist.Dict, error) {
 		return nil, err
 	}
 	return plist.Unmarshal(body)
+}
+
+func createTLSClient(conn net.Conn, record pairrecord.PairRecord) (*tls.Conn, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("connection does not support TLS upgrade")
+	}
+	cert, err := tls.X509KeyPair(record.HostCertificate, record.HostPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("load pair record TLS identity: %w", err)
+	}
+	tlsConn := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{cert},
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+func assertNetConn(conn io.ReadWriteCloser) net.Conn {
+	netConn, _ := conn.(net.Conn)
+	return netConn
 }

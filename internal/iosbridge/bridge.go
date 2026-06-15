@@ -2,6 +2,7 @@ package iosbridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -30,6 +31,11 @@ func New() *Bridge {
 		tunnel:   tunnelManager,
 		location: ioslocation.New(tunnelManager),
 	}
+}
+
+func (b *Bridge) SetLogger(logger func(format string, args ...any)) {
+	b.tunnel.SetLogger(logger)
+	b.location.SetLogger(logger)
 }
 
 func (b *Bridge) SetUDID(udid string) {
@@ -116,6 +122,10 @@ func (b *Bridge) StopTunnel() error {
 
 func (b *Bridge) TunnelStatus() []iostunnel.TunnelInfo {
 	return b.tunnel.Status()
+}
+
+func IsLocationSimulationPending(err error) bool {
+	return errors.Is(err, ioslocation.ErrDVTLocationPending)
 }
 
 func (b *Bridge) SetLocation(ctx context.Context, point core.Coordinate) error {

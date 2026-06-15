@@ -33,4 +33,9 @@ New-Item -ItemType Directory -Force -Path .\dist | Out-Null
 Write-Host "Building gps-simulator-go.exe..."
 go build -v -o .\dist\gps-simulator-go.exe .\cmd\gps-simulator
 
+if (Test-Path .\wintun.dll) {
+    Copy-Item -LiteralPath .\wintun.dll -Destination .\dist\wintun.dll -Force
+    Write-Host "Copied wintun.dll to dist."
+}
+
 Write-Host "Build complete: dist\gps-simulator-go.exe"
