@@ -133,9 +133,9 @@ func (a *Application) stop() {
 					a.logf("Stopping iPhone simulation failed: %s", err)
 					a.setStatus("Stop failed")
 				} else {
-					a.logf("Stopping iPhone simulation: location cleared; tunnel kept running")
+					a.logf("Stopping iPhone simulation: playback stopped; location kept active")
 					a.refreshTunnelStatus()
-					a.setStatus("Location cleared")
+					a.setStatus("Stopped")
 				}
 			})
 		}()
@@ -145,11 +145,58 @@ func (a *Application) stop() {
 	}
 
 	a.currentLabel.SetText("Current: stopped")
-	points := a.selectedPoints()
-	if len(points) > 0 {
-		a.mapView.SetCurrentPosition(points[len(points)-1], "Stopped")
+	a.stateMu.Lock()
+	current := a.joystickPosition
+	a.stateMu.Unlock()
+	if current != nil {
+		a.mapView.SetCurrentPosition(*current, "Stopped")
 	}
 	a.setRunning(false)
+}
+
+func (a *Application) resetLocation() {
+	a.stopPreview()
+	a.stopJoystick()
+	a.mapView.SetFollowMode(false)
+	a.setRunning(false)
+
+	a.stateMu.Lock()
+	a.joystickPosition = nil
+	a.stateMu.Unlock()
+	a.currentLabel.SetText("Current: reset")
+	a.mapView.ClearCurrentPosition()
+
+	if a.bridgeSelect.Selected != bridgeIPhone {
+		a.logf("Dry-run reset complete. No iPhone location was changed.")
+		a.setStatus("Reset")
+		return
+	}
+	if a.bridge.UDID() == "" {
+		dialog.ShowInformation("Missing iPhone", "Select an iPhone before resetting location.", a.window)
+		a.setStatus("No iPhone detected")
+		return
+	}
+
+	a.resetButton.Disable()
+	a.setStatus("Resetting location...")
+	a.logf("Resetting iPhone location: clearing simulated location.")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := a.bridge.ClearLocation(ctx)
+		fyne.Do(func() {
+			a.resetButton.Enable()
+			if err != nil {
+				a.logf("Reset iPhone location failed: %s", err)
+				a.setStatus("Reset failed")
+				dialog.ShowError(err, a.window)
+				return
+			}
+			a.refreshTunnelStatus()
+			a.logf("Reset iPhone location: location cleared; tunnel kept running")
+			a.setStatus("Location reset")
+		})
+	}()
 }
 
 func (a *Application) startPreview(points []core.Coordinate) {
@@ -166,6 +213,10 @@ func (a *Application) startPreview(points []core.Coordinate) {
 	a.mapView.SetFollowMode(true)
 	a.mapView.SetCurrentPosition(points[0], "Simulating")
 	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", points[0].Lat, points[0].Lon))
+	a.stateMu.Lock()
+	first := points[0]
+	a.joystickPosition = &first
+	a.stateMu.Unlock()
 	if len(points) == 1 {
 		return
 	}
@@ -183,14 +234,20 @@ func (a *Application) startPreview(points []core.Coordinate) {
 				if index >= len(points) {
 					fyne.Do(func() {
 						last := points[len(points)-1]
+						a.stateMu.Lock()
+						a.joystickPosition = &last
+						a.stateMu.Unlock()
 						a.mapView.SetCurrentPosition(last, "Arrived")
 						a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
-						a.setStatus("Arrived - press Stop to clear")
+						a.setStatus("Arrived")
 					})
 					return
 				}
 				point := points[index]
 				fyne.Do(func() {
+					a.stateMu.Lock()
+					a.joystickPosition = &point
+					a.stateMu.Unlock()
 					a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", point.Lat, point.Lon))
 					a.mapView.SetCurrentPosition(point, "Simulating")
 				})

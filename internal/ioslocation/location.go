@@ -35,10 +35,16 @@ func (c *Client) SetLocation(ctx context.Context, udid string, point core.Coordi
 		return err
 	}
 	if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
+		if err := locationCancellationError(ctx, err); err != nil {
+			return err
+		}
 		c.logf("Location RSD probe failed, rebuilding tunnel once: %s", err)
 		return c.retrySetLocationWithNewTunnel(ctx, udid, point, fmt.Errorf("RSD TCP probe failed after tunnel start: %w", err))
 	}
 	if err := c.runNativeLocation(ctx, info, point); err != nil {
+		if err := locationCancellationError(ctx, err); err != nil {
+			return err
+		}
 		c.logf("Location DVT set failed, rebuilding tunnel once: %s", err)
 		return c.retrySetLocationWithNewTunnel(ctx, udid, point, err)
 	}
@@ -57,6 +63,9 @@ func (c *Client) PlayRoute(ctx context.Context, udid string, points []core.Coord
 		return fmt.Errorf("RSD TCP probe failed after tunnel start: %w", err)
 	}
 	if err := c.runNativeRoute(ctx, info, points, tick); err != nil {
+		if err := locationCancellationError(ctx, err); err != nil {
+			return err
+		}
 		c.logf("Location DVT route failed, rebuilding tunnel once: %s", err)
 		return c.retryPlayRouteWithNewTunnel(ctx, udid, points, tick, err)
 	}
@@ -124,6 +133,9 @@ func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates 
 }
 
 func (c *Client) retrySetLocationWithNewTunnel(ctx context.Context, udid string, point core.Coordinate, firstErr error) error {
+	if err := locationCancellationError(ctx, firstErr); err != nil {
+		return err
+	}
 	_ = c.Tunnel.Stop(udid)
 	info, err := c.Tunnel.EnsureRunning(ctx, udid)
 	if err != nil {
@@ -139,6 +151,9 @@ func (c *Client) retrySetLocationWithNewTunnel(ctx context.Context, udid string,
 }
 
 func (c *Client) retryPlayRouteWithNewTunnel(ctx context.Context, udid string, points []core.Coordinate, tick time.Duration, firstErr error) error {
+	if err := locationCancellationError(ctx, firstErr); err != nil {
+		return err
+	}
 	_ = c.Tunnel.Stop(udid)
 	info, err := c.Tunnel.EnsureRunning(ctx, udid)
 	if err != nil {
@@ -247,4 +262,16 @@ func compactText(text string, limit int) string {
 		return text
 	}
 	return text[:limit] + "..."
+}
+
+func locationCancellationError(ctx context.Context, err error) error {
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return nil
 }

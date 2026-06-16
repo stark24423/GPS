@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appVersion = "v0.1.1"
+	appVersion = "v0.1.2"
 
 	modeSingle = "Single point"
 	modeRoute  = "Route"
@@ -61,6 +61,7 @@ type Application struct {
 
 	startButton     *widget.Button
 	stopButton      *widget.Button
+	resetButton     *widget.Button
 	clearButton     *widget.Button
 	refreshButton   *widget.Button
 	resolveButton   *widget.Button
@@ -187,6 +188,7 @@ func (a *Application) buildControls() {
 	a.startButton.Importance = widget.HighImportance
 	a.stopButton = widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), a.stop)
 	a.stopButton.Importance = widget.DangerImportance
+	a.resetButton = widget.NewButtonWithIcon("Reset", theme.ContentClearIcon(), a.resetLocation)
 	a.clearButton = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), a.clearPoints)
 	a.refreshButton = widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), a.refreshDevices)
 	a.resolveButton = widget.NewButtonWithIcon("搜尋", theme.SearchIcon(), a.resolveLocationFromInput)

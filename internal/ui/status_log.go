@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -153,7 +154,7 @@ func resolveProjectRoot() string {
 }
 
 func errorsIsCanceled(err error) bool {
-	return err == context.Canceled || err == context.DeadlineExceeded
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func compactError(err error) string {

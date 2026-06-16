@@ -68,7 +68,7 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	moveSection := compactSection("移動", container.NewVBox(
 		labeledSlider("路線速度", a.speedSlider, a.speedLabel),
 		labeledSlider("飄移", a.jitterSlider, a.jitterLabel),
-		buttonGrid(2, a.startButton, a.stopButton),
+		buttonGrid(3, a.startButton, a.stopButton, a.resetButton),
 	))
 
 	joystickHint := widget.NewLabel("方向鍵 / WASD")

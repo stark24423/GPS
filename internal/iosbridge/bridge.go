@@ -173,7 +173,12 @@ func (b *Bridge) StreamLatestLocation(ctx context.Context, updates <-chan core.C
 
 func (b *Bridge) Stop() error {
 	b.stopPlayback()
-	return b.location.ClearLocation(context.Background(), b.UDID())
+	return nil
+}
+
+func (b *Bridge) ClearLocation(ctx context.Context) error {
+	b.stopPlayback()
+	return b.location.ClearLocation(ctx, b.UDID())
 }
 
 func (b *Bridge) stopPlayback() {
