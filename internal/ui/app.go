@@ -2,12 +2,17 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -31,6 +37,11 @@ const (
 
 	bridgeDryRun = "Dry-run"
 	bridgeIPhone = "iPhone"
+
+	inputActionResolve = "resolve"
+	inputActionSingle  = "single"
+	inputActionRoute   = "route"
+	inputActionSetNow  = "set_now"
 )
 
 type Application struct {
@@ -41,9 +52,10 @@ type Application struct {
 	mapView *MapWidget
 	bridge  *iosbridge.Bridge
 
-	modeSelect   *widget.Select
-	bridgeSelect *widget.Select
-	deviceSelect *widget.Select
+	modeSelect    *widget.Select
+	bridgeSelect  *widget.Select
+	deviceSelect  *widget.Select
+	locationEntry *widget.Entry
 
 	speedSlider        *widget.Slider
 	speedLabel         *widget.Label
@@ -68,6 +80,12 @@ type Application struct {
 	refreshButton     *widget.Button
 	tunnelStartButton *widget.Button
 	tunnelStopButton  *widget.Button
+	resolveButton     *widget.Button
+	setSingleButton   *widget.Button
+	addRouteButton    *widget.Button
+	applyNowButton    *widget.Button
+	saveRouteButton   *widget.Button
+	loadRouteButton   *widget.Button
 	statusDot         *canvas.Circle
 
 	stateMu          sync.Mutex
@@ -105,13 +123,14 @@ func NewApplication() *Application {
 		bridge:        iosbridge.New(),
 		outputDir:     filepath.Join(root, "output"),
 		deviceChoices: make(map[string]string),
-		joystickSpeed: 20,
+		joystickSpeed: 19,
 	}
 	a.logFilePath = filepath.Join(a.outputDir, "gps-simulator.log")
 
 	a.mapView = NewMapWidget(a.addPoint)
 	a.buildControls()
 	a.window.SetContent(a.buildLayout())
+	a.window.Canvas().SetOnTypedKey(a.onKeyboardMovement)
 	a.bridge.SetLogger(a.logf)
 	a.stopButton.Disable()
 	a.refreshDevices()
@@ -159,10 +178,13 @@ func (a *Application) buildControls() {
 	})
 	a.deviceSelect.PlaceHolder = "Default device"
 
+	a.locationEntry = widget.NewEntry()
+	a.locationEntry.SetPlaceHolder("地址或 GPS 座標，例如 24.7808548, 121.0252718")
+
 	a.speedSlider = widget.NewSlider(0.1, 300)
 	a.speedSlider.Step = 0.1
-	a.speedSlider.Value = 5
-	a.speedLabel = widget.NewLabel("5.0 km/h")
+	a.speedSlider.Value = 19
+	a.speedLabel = widget.NewLabel("19.0 km/h")
 	a.speedSlider.OnChanged = func(value float64) {
 		a.speedLabel.SetText(fmt.Sprintf("%.1f km/h", value))
 	}
@@ -175,7 +197,7 @@ func (a *Application) buildControls() {
 		a.jitterLabel.SetText(fmt.Sprintf("%.1f m", value))
 	}
 
-	a.joystickSpeedLabel = widget.NewLabel("20.0 km/h")
+	a.joystickSpeedLabel = widget.NewLabel("19.0 km/h")
 
 	a.startButton = widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), a.start)
 	a.startButton.Importance = widget.HighImportance
@@ -188,6 +210,24 @@ func (a *Application) buildControls() {
 	a.refreshButton = widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), a.refreshDevices)
 	a.tunnelStartButton = widget.NewButtonWithIcon("Start Tunnel", theme.MediaPlayIcon(), a.startTunnel)
 	a.tunnelStopButton = widget.NewButtonWithIcon("Stop Tunnel", theme.MediaStopIcon(), a.stopTunnel)
+	a.resolveButton = widget.NewButtonWithIcon("搜尋", theme.SearchIcon(), a.resolveLocationFromInput)
+	a.setSingleButton = widget.NewButtonWithIcon("設為單點", theme.RadioButtonIcon(), func() {
+		a.applyInputLocation(inputActionSingle)
+	})
+	a.addRouteButton = widget.NewButtonWithIcon("加入路線", theme.ContentAddIcon(), func() {
+		a.applyInputLocation(inputActionRoute)
+	})
+	a.applyNowButton = widget.NewButtonWithIcon("立即修改定位", theme.ConfirmIcon(), func() {
+		a.applyInputLocation(inputActionSetNow)
+	})
+	a.applyNowButton.Importance = widget.HighImportance
+	a.saveRouteButton = widget.NewButtonWithIcon("儲存路線", theme.DocumentSaveIcon(), a.saveRouteTXT)
+	a.loadRouteButton = widget.NewButtonWithIcon("載入路線", theme.FolderOpenIcon(), a.loadRouteTXT)
+	a.locationEntry.SetPlaceHolder("地址或 GPS 座標，例如 24.7808548, 121.0252718")
+	a.resolveButton.SetText("搜尋")
+	a.setSingleButton.SetText("設為單點")
+	a.addRouteButton.SetText("加入路線")
+	a.applyNowButton.SetText("立即修改定位")
 
 	a.logLabel = widget.NewLabel("")
 	a.logLabel.Wrapping = fyne.TextWrapWord
@@ -199,17 +239,26 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	mapToolbar := widget.NewToolbar(
 		widget.NewToolbarAction(theme.ZoomInIcon(), a.mapView.ZoomIn),
 		widget.NewToolbarAction(theme.ZoomOutIcon(), a.mapView.ZoomOut),
+		widget.NewToolbarSeparator(),
+		widget.NewToolbarAction(theme.ZoomFitIcon(), func() {
+			a.stateMu.Lock()
+			current := a.joystickPosition
+			a.stateMu.Unlock()
+			if current != nil {
+				a.mapView.CenterOn(*current)
+			}
+		}),
 	)
 	mapHeader := container.NewBorder(nil, nil,
-		widget.NewLabelWithStyle("Map", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("地圖", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		mapToolbar,
-		widget.NewLabel("Click to add a point. Drag to pan. Scroll to zoom."),
+		widget.NewLabel("點擊加入定位點，拖曳平移，滾輪縮放"),
 	)
 	mapArea := container.NewBorder(mapHeader, nil, nil, nil, a.mapView)
 
 	joystickSpeedSlider := widget.NewSlider(0.1, 500)
 	joystickSpeedSlider.Step = 0.5
-	joystickSpeedSlider.Value = 20
+	joystickSpeedSlider.Value = a.joystickSpeed
 	joystickSpeedSlider.OnChanged = func(value float64) {
 		a.stateMu.Lock()
 		a.joystickSpeed = value
@@ -218,72 +267,103 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	}
 	joystick := NewJoystick(a.onJoystickDirection)
 
-	statusRow := container.NewHBox(statusDotCell(a.statusDot, a.statusLabel), a.statusLabel)
-	topInfo := container.NewVBox(
-		container.NewPadded(container.NewGridWithColumns(5,
-			infoPill("Status", statusRow),
-			infoValue(a.pointsLabel),
-			infoValue(a.currentLabel),
-			infoValue(a.deviceLabel),
-			infoValue(a.tunnelLabel),
+	headerDevice := container.NewHBox(
+		container.NewGridWrap(fyne.NewSize(260, a.deviceSelect.MinSize().Height), a.deviceSelect),
+		a.refreshButton,
+	)
+	headerRoute := container.NewHBox(a.saveRouteButton, a.loadRouteButton, a.clearButton)
+	appHeader := container.NewVBox(
+		container.NewPadded(container.NewBorder(nil, nil,
+			headerDevice,
+			headerRoute,
+			nil,
 		)),
 		widget.NewSeparator(),
 	)
 
-	simulationForm := widget.NewForm(
-		widget.NewFormItem("Mode", a.modeSelect),
-		widget.NewFormItem("Bridge", a.bridgeSelect),
-		widget.NewFormItem("Route speed", valueSlider(a.speedSlider, a.speedLabel)),
-		widget.NewFormItem("Jitter", valueSlider(a.jitterSlider, a.jitterLabel)),
-	)
-	simulationSection := compactSection("Simulation", container.NewVBox(
-		simulationForm,
-		container.NewGridWithColumns(2, a.startButton, a.stopButton),
+	locationSection := compactSection("定位", container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("模式", a.modeSelect),
+			widget.NewFormItem("輸出", a.bridgeSelect),
+		),
+		a.locationEntry,
+		buttonGrid(3, a.resolveButton, a.setSingleButton, a.addRouteButton),
+		container.NewPadded(a.applyNowButton),
 	))
 
-	joystickSection := compactSection("Manual Movement", container.NewVBox(
-		container.NewCenter(container.NewGridWrap(fyne.NewSize(104, 104), joystick)),
-		widget.NewForm(widget.NewFormItem("Joystick speed", valueSlider(joystickSpeedSlider, a.joystickSpeedLabel))),
+	moveSection := compactSection("移動", container.NewVBox(
+		labeledSlider("路線速度", a.speedSlider, a.speedLabel),
+		labeledSlider("飄移", a.jitterSlider, a.jitterLabel),
+		buttonGrid(2, a.startButton, a.stopButton),
 	))
 
-	deviceForm := widget.NewForm(
-		widget.NewFormItem("Device", a.deviceSelect),
-	)
-	deviceSection := compactSection("iPhone Connection", container.NewVBox(
-		deviceForm,
-		container.NewGridWithColumns(1, a.refreshButton),
+	joystickHint := widget.NewLabel("方向鍵 / WASD")
+	joystickHint.Alignment = fyne.TextAlignCenter
+	joystickHint.TextStyle = fyne.TextStyle{Italic: true}
+	joystickStopButton := widget.NewButtonWithIcon("停止", theme.MediaStopIcon(), func() {
+		joystick.Reset()
+		a.stopJoystick()
+		a.mapView.SetFollowMode(false)
+		a.setStatus("Joystick paused")
+	})
+	joystickSection := compactSection("搖桿", container.NewBorder(nil, nil,
+		container.NewCenter(container.NewGridWrap(fyne.NewSize(112, 112), joystick)),
+		nil,
+		container.NewVBox(
+			labeledSlider("速度", joystickSpeedSlider, a.joystickSpeedLabel),
+			joystickHint,
+			container.NewPadded(joystickStopButton),
+		),
 	))
 
-	utilityToolbar := widget.NewToolbar(
-		widget.NewToolbarAction(theme.FolderOpenIcon(), a.openOutputFolder),
-		widget.NewToolbarAction(theme.InfoIcon(), a.openLogWindow),
-	)
-	utilitySection := compactSection("Utilities", container.NewVBox(
-		container.NewGridWithColumns(2, a.undoButton, a.clearButton),
-		utilityToolbar,
-	))
-
-	sideContent := container.NewVBox(
-		widget.NewLabelWithStyle("GPS Simulator", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewSeparator(),
-		simulationSection,
+	side := container.NewPadded(container.NewVBox(
+		locationSection,
+		moveSection,
 		joystickSection,
-		deviceSection,
-		utilitySection,
-	)
-	sideScroll := container.NewVScroll(container.NewPadded(sideContent))
-	sideScroll.SetMinSize(fyne.NewSize(340, 620))
-	side := container.NewBorder(nil, nil, nil, nil, sideScroll)
+	))
 
 	split := container.NewHSplit(mapArea, side)
 	split.Offset = 0.72
-	return container.NewBorder(topInfo, nil, nil, nil, split)
+
+	statusRow := container.NewHBox(statusDotCell(a.statusDot, a.statusLabel), a.statusLabel)
+	footer := container.NewVBox(
+		widget.NewSeparator(),
+		container.NewPadded(container.NewGridWithColumns(4,
+			infoPill("狀態", statusRow),
+			infoValue(a.pointsLabel),
+			infoValue(a.currentLabel),
+			infoValue(a.tunnelLabel),
+		)),
+	)
+
+	return container.NewBorder(appHeader, footer, nil, nil, split)
 }
 
 func valueSlider(slider *widget.Slider, valueLabel *widget.Label) fyne.CanvasObject {
 	valueLabel.Alignment = fyne.TextAlignTrailing
 	valueLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	return container.NewBorder(nil, nil, nil, valueLabel, slider)
+}
+
+func labeledSlider(label string, slider *widget.Slider, valueLabel *widget.Label) fyne.CanvasObject {
+	labelWidget := widget.NewLabel(label)
+	labelWidget.Truncation = fyne.TextTruncateEllipsis
+	valueLabel.Alignment = fyne.TextAlignTrailing
+	valueLabel.TextStyle = fyne.TextStyle{Monospace: true}
+
+	return container.NewBorder(nil, nil,
+		container.NewGridWrap(fyne.NewSize(76, slider.MinSize().Height), labelWidget),
+		container.NewGridWrap(fyne.NewSize(82, slider.MinSize().Height), valueLabel),
+		slider,
+	)
+}
+
+func buttonGrid(columns int, objects ...fyne.CanvasObject) fyne.CanvasObject {
+	padded := make([]fyne.CanvasObject, 0, len(objects))
+	for _, object := range objects {
+		padded = append(padded, container.NewPadded(object))
+	}
+	return container.NewGridWithColumns(columns, padded...)
 }
 
 func compactSection(title string, content fyne.CanvasObject) fyne.CanvasObject {
@@ -313,6 +393,64 @@ func statusDotCell(dot *canvas.Circle, label *widget.Label) fyne.CanvasObject {
 		fyne.NewSize(12, height),
 		container.NewCenter(container.NewGridWrap(fyne.NewSize(12, 12), dot)),
 	)
+}
+
+func (a *Application) resolveLocationFromInput() {
+	a.applyInputLocation(inputActionResolve)
+}
+
+func (a *Application) applyInputLocation(action string) {
+	query := strings.TrimSpace(a.locationEntry.Text)
+	if query == "" {
+		dialog.ShowInformation("缺少定位資料", "請輸入地址或 GPS 座標。", a.window)
+		return
+	}
+
+	a.setLocationButtonsEnabled(false)
+	a.setStatus("Resolving location...")
+	go func() {
+		point, label, err := resolveLocation(query)
+		fyne.Do(func() {
+			a.setLocationButtonsEnabled(true)
+			if err != nil {
+				a.setStatus("Location lookup failed")
+				dialog.ShowError(err, a.window)
+				return
+			}
+			a.applyResolvedLocation(action, point, label)
+		})
+	}()
+}
+
+func (a *Application) applyResolvedLocation(action string, point core.Coordinate, label string) {
+	switch action {
+	case inputActionRoute:
+		a.modeSelect.SetSelected(modeRoute)
+		a.addPoint(point)
+		a.setStatus("Route point added")
+	case inputActionSetNow:
+		a.modeSelect.SetSelected(modeSingle)
+		a.addPoint(point)
+		a.start()
+	case inputActionSingle, inputActionResolve:
+		a.modeSelect.SetSelected(modeSingle)
+		a.addPoint(point)
+		a.setStatus("Location ready")
+	}
+	a.mapView.CenterOn(point)
+	a.locationEntry.SetText(label)
+	a.logf("Resolved location: %s -> %.6f, %.6f", label, point.Lat, point.Lon)
+}
+
+func (a *Application) setLocationButtonsEnabled(enabled bool) {
+	buttons := []*widget.Button{a.resolveButton, a.setSingleButton, a.addRouteButton, a.applyNowButton}
+	for _, button := range buttons {
+		if enabled {
+			button.Enable()
+		} else {
+			button.Disable()
+		}
+	}
 }
 
 func (a *Application) addPoint(point core.Coordinate) {
@@ -372,6 +510,91 @@ func (a *Application) removeLastPoint() {
 		a.mapView.ClearCurrentPosition()
 	}
 	a.logf("Removed point: %.6f, %.6f", removed.Lat, removed.Lon)
+}
+
+func (a *Application) saveRouteTXT() {
+	points := a.selectedPoints()
+	if len(points) == 0 {
+		dialog.ShowInformation("沒有路線", "請先建立至少一個定位點。", a.window)
+		return
+	}
+
+	rendered, err := core.RenderRouteTXT(points)
+	if err != nil {
+		dialog.ShowError(err, a.window)
+		return
+	}
+
+	saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+		if err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		if writer == nil {
+			return
+		}
+		defer writer.Close()
+		if _, err := io.WriteString(writer, rendered); err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		a.logf("Route TXT saved: %s", writer.URI().String())
+		a.setStatus("Route saved")
+	}, a.window)
+	saveDialog.SetFileName(fmt.Sprintf("route_%s.txt", time.Now().Format("20060102_150405")))
+	saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".txt"}))
+	saveDialog.Show()
+}
+
+func (a *Application) loadRouteTXT() {
+	openDialog := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		if reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		points, err := core.ParseRouteTXT(string(data))
+		if err != nil {
+			dialog.ShowError(err, a.window)
+			return
+		}
+		a.applyLoadedRoute(points)
+		a.logf("Route TXT loaded: %s", reader.URI().String())
+		a.setStatus("Route loaded")
+	}, a.window)
+	openDialog.SetFilter(storage.NewExtensionFileFilter([]string{".txt"}))
+	openDialog.Show()
+}
+
+func (a *Application) applyLoadedRoute(points []core.Coordinate) {
+	a.stopPreview()
+	a.stopJoystick()
+	a.stateMu.Lock()
+	a.points = append([]core.Coordinate(nil), points...)
+	last := points[len(points)-1]
+	a.joystickPosition = &core.Coordinate{Lat: last.Lat, Lon: last.Lon}
+	a.stateMu.Unlock()
+
+	if len(points) > 1 {
+		a.modeSelect.SetSelected(modeRoute)
+	} else {
+		a.modeSelect.SetSelected(modeSingle)
+	}
+	a.pointsLabel.SetText(fmt.Sprintf("Points: %d", len(points)))
+	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
+	a.mapView.SetFollowMode(false)
+	a.mapView.SetPoints(points)
+	a.mapView.SetCurrentPosition(last, "Loaded")
+	a.mapView.CenterOn(last)
 }
 
 func (a *Application) keepOnlyLastPoint() {
@@ -705,6 +928,74 @@ func (a *Application) joystickTick() {
 	}
 }
 
+func (a *Application) onKeyboardMovement(event *fyne.KeyEvent) {
+	if a.window.Canvas().Focused() != nil {
+		return
+	}
+
+	var dx, dy float64
+	switch strings.ToLower(string(event.Name)) {
+	case strings.ToLower(string(fyne.KeyUp)), "w":
+		dy = 1
+	case strings.ToLower(string(fyne.KeyDown)), "s":
+		dy = -1
+	case strings.ToLower(string(fyne.KeyLeft)), "a":
+		dx = -1
+	case strings.ToLower(string(fyne.KeyRight)), "d":
+		dx = 1
+	default:
+		return
+	}
+	a.keyboardNudge(dx, dy)
+}
+
+func (a *Application) keyboardNudge(dx, dy float64) {
+	a.stateMu.Lock()
+	if a.running {
+		a.stateMu.Unlock()
+		a.logf("Keyboard movement disabled while simulation is running.")
+		return
+	}
+	if a.joystickPosition == nil {
+		if len(a.points) > 0 {
+			last := a.points[len(a.points)-1]
+			a.joystickPosition = &core.Coordinate{Lat: last.Lat, Lon: last.Lon}
+		} else {
+			a.joystickPosition = &core.Coordinate{Lat: 24.7808548, Lon: 121.0252718}
+		}
+	}
+	current := *a.joystickPosition
+	speed := a.joystickSpeed
+	a.stateMu.Unlock()
+
+	speedMps := speed * 1000 / 3600
+	next := core.OffsetCoordinate(current, dx*speedMps*0.35, dy*speedMps*0.35)
+
+	a.stateMu.Lock()
+	a.joystickPosition = &next
+	a.stateMu.Unlock()
+
+	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", next.Lat, next.Lon))
+	a.mapView.SetFollowMode(true)
+	a.mapView.SetCurrentPosition(next, "Keyboard")
+	a.setStatus("Keyboard movement")
+
+	if a.bridgeSelect.Selected == bridgeIPhone && a.joystickSendInFlight.CompareAndSwap(false, true) {
+		go func(point core.Coordinate) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err := a.bridge.SetLocation(ctx, point)
+			a.joystickSendInFlight.Store(false)
+			if err != nil {
+				fyne.Do(func() {
+					a.logf("Keyboard iPhone error: %s", err)
+					a.setStatus("iPhone error")
+				})
+			}
+		}(next)
+	}
+}
+
 func (a *Application) refreshDevices() {
 	a.refreshButton.Disable()
 	a.deviceLabel.SetText("Device: scanning...")
@@ -990,6 +1281,80 @@ func (a *Application) openLogWindow() {
 		a.logWin.SetContent(container.NewBorder(nil, container.NewHBox(clearButton), nil, nil, logBox))
 	}
 	a.logWin.Show()
+}
+
+func resolveLocation(query string) (core.Coordinate, string, error) {
+	if point, ok := parseCoordinate(query); ok {
+		label := fmt.Sprintf("%.6f, %.6f", point.Lat, point.Lon)
+		return point, label, nil
+	}
+	return geocodeAddress(query)
+}
+
+func parseCoordinate(text string) (core.Coordinate, bool) {
+	normalized := strings.NewReplacer("，", ",", " ", ",", "\t", ",", "\n", ",").Replace(text)
+	parts := strings.Split(normalized, ",")
+	values := make([]float64, 0, 2)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.ParseFloat(part, 64)
+		if err != nil {
+			return core.Coordinate{}, false
+		}
+		values = append(values, value)
+	}
+	if len(values) != 2 {
+		return core.Coordinate{}, false
+	}
+	lat, lon := values[0], values[1]
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return core.Coordinate{}, false
+	}
+	return core.Coordinate{Lat: lat, Lon: lon}, true
+}
+
+func geocodeAddress(query string) (core.Coordinate, string, error) {
+	endpoint := "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + url.QueryEscape(query)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return core.Coordinate{}, "", err
+	}
+	req.Header.Set("User-Agent", "gpssim-go-fyne/1.0")
+
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return core.Coordinate{}, "", fmt.Errorf("地址搜尋失敗：%w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return core.Coordinate{}, "", fmt.Errorf("地址搜尋失敗：HTTP %d", resp.StatusCode)
+	}
+
+	var results []struct {
+		Lat         string `json:"lat"`
+		Lon         string `json:"lon"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return core.Coordinate{}, "", fmt.Errorf("地址搜尋回應無法解析：%w", err)
+	}
+	if len(results) == 0 {
+		return core.Coordinate{}, "", fmt.Errorf("找不到地址：%s", query)
+	}
+
+	lat, err := strconv.ParseFloat(results[0].Lat, 64)
+	if err != nil {
+		return core.Coordinate{}, "", fmt.Errorf("地址緯度無法解析：%w", err)
+	}
+	lon, err := strconv.ParseFloat(results[0].Lon, 64)
+	if err != nil {
+		return core.Coordinate{}, "", fmt.Errorf("地址經度無法解析：%w", err)
+	}
+	return core.Coordinate{Lat: lat, Lon: lon}, results[0].DisplayName, nil
 }
 
 func resolveProjectRoot() string {

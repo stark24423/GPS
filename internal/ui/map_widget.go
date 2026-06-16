@@ -88,6 +88,13 @@ func (m *MapWidget) SetCurrentPosition(point core.Coordinate, status string) {
 	m.Refresh()
 }
 
+func (m *MapWidget) CenterOn(point core.Coordinate) {
+	m.mu.Lock()
+	m.center = point
+	m.mu.Unlock()
+	m.Refresh()
+}
+
 func (m *MapWidget) ClearCurrentPosition() {
 	m.mu.Lock()
 	m.current = nil

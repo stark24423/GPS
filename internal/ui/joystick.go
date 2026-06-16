@@ -93,23 +93,47 @@ func (j *Joystick) render(width, height int) image.Image {
 		return image.NewRGBA(image.Rect(0, 0, 1, 1))
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{R: 248, G: 250, B: 252, A: 255}}, image.Point{}, draw.Src)
+	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{R: 255, G: 255, B: 255, A: 255}}, image.Point{}, draw.Src)
 
 	cx := width / 2
 	cy := height / 2
-	radius := int(math.Min(float64(width), float64(height))/2) - 8
-	knobRadius := int(float64(radius) * 0.34)
+	radius := int(math.Min(float64(width), float64(height))/2) - 10
+	innerRadius := radius - 5
+	knobRadius := int(float64(radius) * 0.28)
 	kx := cx + int(j.dx*float64(radius))
 	ky := cy - int(j.dy*float64(radius))
 
+	drawCircle(dst, cx+1, cy+2, radius, color.RGBA{R: 203, G: 213, B: 225, A: 120})
 	drawCircle(dst, cx, cy, radius, color.RGBA{R: 226, G: 232, B: 240, A: 255})
-	drawCircle(dst, cx, cy, radius-2, color.RGBA{R: 241, G: 245, B: 249, A: 255})
-	drawLine(dst, cx-radius/2, cy, cx+radius/2, cy, color.RGBA{R: 203, G: 213, B: 225, A: 255}, 1)
-	drawLine(dst, cx, cy-radius/2, cx, cy+radius/2, color.RGBA{R: 203, G: 213, B: 225, A: 255}, 1)
-	drawCircle(dst, kx, ky, knobRadius, color.RGBA{R: 29, G: 78, B: 216, A: 255})
-	drawCircle(dst, kx-3, ky-3, knobRadius/2, color.RGBA{R: 59, G: 130, B: 246, A: 255})
+	drawCircle(dst, cx, cy, innerRadius, color.RGBA{R: 248, G: 250, B: 252, A: 255})
+	drawCircleOutline(dst, cx, cy, innerRadius, color.RGBA{R: 203, G: 213, B: 225, A: 255})
+	drawLine(dst, cx-innerRadius+12, cy, cx+innerRadius-12, cy, color.RGBA{R: 203, G: 213, B: 225, A: 255}, 1)
+	drawLine(dst, cx, cy-innerRadius+12, cx, cy+innerRadius-12, color.RGBA{R: 203, G: 213, B: 225, A: 255}, 1)
+	drawCircle(dst, cx, cy, 3, color.RGBA{R: 148, G: 163, B: 184, A: 255})
+
+	drawCircle(dst, kx+1, ky+2, knobRadius, color.RGBA{R: 30, G: 41, B: 59, A: 90})
+	drawCircle(dst, kx, ky, knobRadius, color.RGBA{R: 37, G: 99, B: 235, A: 255})
+	drawCircle(dst, kx-3, ky-3, knobRadius/2, color.RGBA{R: 96, G: 165, B: 250, A: 255})
+	drawCircleOutline(dst, kx, ky, knobRadius, color.RGBA{R: 30, G: 64, B: 175, A: 255})
 
 	return dst
+}
+
+func drawCircleOutline(dst *image.RGBA, cx, cy, radius int, c color.RGBA) {
+	r2 := radius * radius
+	inner := radius - 2
+	if inner < 0 {
+		inner = 0
+	}
+	inner2 := inner * inner
+	for y := -radius; y <= radius; y++ {
+		for x := -radius; x <= radius; x++ {
+			d := x*x + y*y
+			if d <= r2 && d >= inner2 {
+				setPixel(dst, cx+x, cy+y, c)
+			}
+		}
+	}
 }
 
 type joystickRenderer struct {
