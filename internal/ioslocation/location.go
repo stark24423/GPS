@@ -65,10 +65,62 @@ func (c *Client) PlayRoute(ctx context.Context, udid string, points []core.Coord
 
 func (c *Client) ClearLocation(ctx context.Context, udid string) error {
 	if info, ok := c.Tunnel.Info(udid); ok {
-		_ = probeRSD(ctx, info.RSDAddress, info.RSDPort)
-		_ = c.runNativeClear(ctx, info)
+		if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
+			c.logf("Location clear warning: RSD probe failed: %s", err)
+			return err
+		}
+		if err := c.runNativeClear(ctx, info); err != nil {
+			c.logf("Location clear warning: DVT clear failed: %s", err)
+			return err
+		}
 	}
 	return nil
+}
+
+func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates <-chan core.Coordinate, tick time.Duration) error {
+	if tick <= 0 {
+		tick = 250 * time.Millisecond
+	}
+	info, err := c.Tunnel.EnsureRunning(ctx, udid)
+	if err != nil {
+		return err
+	}
+	if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
+		return fmt.Errorf("RSD TCP probe failed after tunnel start: %w", err)
+	}
+
+	client, err := c.openNativeDVT(ctx, info)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	c.logf("Location DVT native: stream latest tick=%s", tick)
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
+	var latest core.Coordinate
+	dirty := false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case point, ok := <-updates:
+			if !ok {
+				return nil
+			}
+			latest = point
+			dirty = true
+		case <-ticker.C:
+			if !dirty {
+				continue
+			}
+			if err := client.SetLocation(ctx, latest.Lat, latest.Lon); err != nil {
+				return fmt.Errorf("stream latest location: %w", err)
+			}
+			dirty = false
+		}
+	}
 }
 
 func (c *Client) retrySetLocationWithNewTunnel(ctx context.Context, udid string, point core.Coordinate, firstErr error) error {

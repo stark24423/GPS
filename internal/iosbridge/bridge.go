@@ -163,6 +163,14 @@ func (b *Bridge) PlayRoute(ctx context.Context, points []core.Coordinate, tick t
 	return b.location.PlayRoute(playCtx, udid, points, tick)
 }
 
+func (b *Bridge) StreamLatestLocation(ctx context.Context, updates <-chan core.Coordinate, tick time.Duration) error {
+	udid := b.UDID()
+	if udid == "" {
+		return fmt.Errorf("select an iPhone before streaming location")
+	}
+	return b.location.StreamLatestLocation(ctx, udid, updates, tick)
+}
+
 func (b *Bridge) Stop() error {
 	b.stopPlayback()
 	return b.location.ClearLocation(context.Background(), b.UDID())

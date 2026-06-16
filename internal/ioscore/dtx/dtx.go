@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"gpssim/internal/ioscore/nskeyedarchive"
@@ -27,6 +28,7 @@ const (
 
 type Client struct {
 	conn      net.Conn
+	mu        sync.Mutex
 	nextID    uint32
 	nextCode  int32
 	replyChan chan message
@@ -41,8 +43,6 @@ func DialLocation(ctx context.Context, address string, port int, logger func(for
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
 	}
 	client := &Client{
 		conn:      conn,
@@ -108,6 +108,17 @@ func (c *Client) openChannel(ctx context.Context, identifier string) error {
 }
 
 func (c *Client) dispatch(ctx context.Context, channelCode int32, selector string, args []auxValue, expectsReply bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = c.conn.SetDeadline(deadline)
+		defer c.conn.SetDeadline(time.Time{})
+	} else {
+		_ = c.conn.SetDeadline(time.Now().Add(15 * time.Second))
+		defer c.conn.SetDeadline(time.Time{})
+	}
+
 	payload, err := nskeyedarchive.Archive(selector)
 	if err != nil {
 		return err
