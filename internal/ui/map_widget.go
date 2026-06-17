@@ -36,6 +36,7 @@ type MapWidget struct {
 	mu            sync.RWMutex
 	center        core.Coordinate
 	zoom          int
+	renderSize    fyne.Size
 	points        []core.Coordinate
 	current       *core.Coordinate
 	currentStatus string
@@ -142,7 +143,8 @@ func (m *MapWidget) Scrolled(event *fyne.ScrollEvent) {
 		return
 	}
 
-	m.zoomAt(event.Position, m.Size(), event.Scrolled.DY > 0)
+	pos, size := m.eventRenderGeometry(event.Position)
+	m.zoomAt(pos, size, event.Scrolled.DY > 0)
 }
 
 func (m *MapWidget) Tapped(event *fyne.PointEvent) {
@@ -152,14 +154,16 @@ func (m *MapWidget) Tapped(event *fyne.PointEvent) {
 	if locked || m.onPoint == nil {
 		return
 	}
-	m.onPoint(m.coordinateAt(event.Position, m.Size()))
+	pos, size := m.eventRenderGeometry(event.Position)
+	m.onPoint(m.coordinateAt(pos, size))
 }
 
 func (m *MapWidget) Dragged(event *fyne.DragEvent) {
 	m.mu.Lock()
+	dx, dy := m.scaledDeltaLocked(event.Dragged)
 	centerX, centerY := latLonToWorld(m.center.Lat, m.center.Lon, m.zoom)
-	centerX -= float64(event.Dragged.DX)
-	centerY -= float64(event.Dragged.DY)
+	centerX -= float64(dx)
+	centerY -= float64(dy)
 	lat, lon := worldToLatLon(centerX, centerY, m.zoom)
 	m.center = core.Coordinate{Lat: lat, Lon: lon}
 	m.followMode = false
@@ -202,9 +206,39 @@ func (m *MapWidget) zoomAt(pos fyne.Position, size fyne.Size, zoomIn bool) {
 
 func (m *MapWidget) CreateRenderer() fyne.WidgetRenderer {
 	raster := canvas.NewRaster(func(width, height int) image.Image {
+		m.setRenderSize(width, height)
 		return m.render(width, height)
 	})
 	return &mapRenderer{raster: raster}
+}
+
+func (m *MapWidget) setRenderSize(width, height int) {
+	m.mu.Lock()
+	m.renderSize = fyne.NewSize(float32(width), float32(height))
+	m.mu.Unlock()
+}
+
+func (m *MapWidget) eventRenderGeometry(pos fyne.Position) (fyne.Position, fyne.Size) {
+	m.mu.RLock()
+	widgetSize := m.Size()
+	renderSize := m.renderSize
+	m.mu.RUnlock()
+
+	if renderSize.Width <= 0 || renderSize.Height <= 0 || widgetSize.Width <= 0 || widgetSize.Height <= 0 {
+		return pos, widgetSize
+	}
+	scaleX := renderSize.Width / widgetSize.Width
+	scaleY := renderSize.Height / widgetSize.Height
+	return fyne.NewPos(pos.X*scaleX, pos.Y*scaleY), renderSize
+}
+
+func (m *MapWidget) scaledDeltaLocked(delta fyne.Delta) (float32, float32) {
+	widgetSize := m.Size()
+	renderSize := m.renderSize
+	if renderSize.Width <= 0 || renderSize.Height <= 0 || widgetSize.Width <= 0 || widgetSize.Height <= 0 {
+		return delta.DX, delta.DY
+	}
+	return delta.DX * renderSize.Width / widgetSize.Width, delta.DY * renderSize.Height / widgetSize.Height
 }
 
 func (m *MapWidget) coordinateAt(pos fyne.Position, size fyne.Size) core.Coordinate {

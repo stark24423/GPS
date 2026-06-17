@@ -2,6 +2,7 @@ package plist
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
@@ -235,6 +236,10 @@ func writeValue(b *bytes.Buffer, value Value) error {
 		b.WriteString("<string>")
 		xml.EscapeText(b, []byte(v))
 		b.WriteString("</string>")
+	case []byte:
+		b.WriteString("<data>")
+		b.WriteString(base64.StdEncoding.EncodeToString(v))
+		b.WriteString("</data>")
 	case int:
 		fmt.Fprintf(b, "<integer>%d</integer>", v)
 	case uint32:
@@ -302,12 +307,22 @@ func readValue(decoder *xml.Decoder, start xml.StartElement) (Value, error) {
 	switch start.Name.Local {
 	case "dict":
 		return readDict(decoder)
-	case "string", "data", "date":
+	case "string", "date":
 		var text string
 		if err := decoder.DecodeElement(&text, &start); err != nil {
 			return nil, err
 		}
 		return text, nil
+	case "data":
+		var text string
+		if err := decoder.DecodeElement(&text, &start); err != nil {
+			return nil, err
+		}
+		value, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(text), ""))
+		if err != nil {
+			return nil, err
+		}
+		return value, nil
 	case "integer":
 		var text string
 		if err := decoder.DecodeElement(&text, &start); err != nil {

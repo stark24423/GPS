@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"gpssim/internal/core"
@@ -17,12 +18,23 @@ import (
 var ErrDVTLocationPending = errors.New("RSD TCP is reachable, but RemoteXPC/DTX LocationSimulation is not implemented yet")
 
 type Client struct {
-	Tunnel *iostunnel.Manager
-	logger func(format string, args ...any)
+	Tunnel    *iostunnel.Manager
+	logger    func(format string, args ...any)
+	sessionMu sync.Mutex
+	sessions  map[string]*nativeSession
+}
+
+type nativeSession struct {
+	client     *dtx.Client
+	rsdAddress string
+	rsdPort    int
 }
 
 func New(manager *iostunnel.Manager) *Client {
-	return &Client{Tunnel: manager}
+	return &Client{
+		Tunnel:   manager,
+		sessions: make(map[string]*nativeSession),
+	}
 }
 
 func (c *Client) SetLogger(logger func(format string, args ...any)) {
@@ -73,6 +85,7 @@ func (c *Client) PlayRoute(ctx context.Context, udid string, points []core.Coord
 }
 
 func (c *Client) ClearLocation(ctx context.Context, udid string) error {
+	defer c.closeNativeSession(udid)
 	if info, ok := c.Tunnel.Info(udid); ok {
 		if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
 			c.logf("Location clear warning: RSD probe failed: %s", err)
@@ -98,11 +111,10 @@ func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates 
 		return fmt.Errorf("RSD TCP probe failed after tunnel start: %w", err)
 	}
 
-	client, err := c.openNativeDVT(ctx, info)
+	client, err := c.nativeSession(ctx, info)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
 
 	c.logf("Location DVT native: stream latest tick=%s", tick)
 	ticker := time.NewTicker(tick)
@@ -136,6 +148,7 @@ func (c *Client) retrySetLocationWithNewTunnel(ctx context.Context, udid string,
 	if err := locationCancellationError(ctx, firstErr); err != nil {
 		return err
 	}
+	c.closeNativeSession(udid)
 	_ = c.Tunnel.Stop(udid)
 	info, err := c.Tunnel.EnsureRunning(ctx, udid)
 	if err != nil {
@@ -154,6 +167,7 @@ func (c *Client) retryPlayRouteWithNewTunnel(ctx context.Context, udid string, p
 	if err := locationCancellationError(ctx, firstErr); err != nil {
 		return err
 	}
+	c.closeNativeSession(udid)
 	_ = c.Tunnel.Stop(udid)
 	info, err := c.Tunnel.EnsureRunning(ctx, udid)
 	if err != nil {
@@ -178,21 +192,19 @@ func probeRSD(ctx context.Context, address string, port int) error {
 }
 
 func (c *Client) runNativeLocation(ctx context.Context, info iostunnel.TunnelInfo, point core.Coordinate) error {
-	client, err := c.openNativeDVT(ctx, info)
+	client, err := c.nativeSession(ctx, info)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
 	c.logf("Location DVT native: set %.8f, %.8f", point.Lat, point.Lon)
 	return client.SetLocation(ctx, point.Lat, point.Lon)
 }
 
 func (c *Client) runNativeClear(ctx context.Context, info iostunnel.TunnelInfo) error {
-	client, err := c.openNativeDVT(ctx, info)
+	client, err := c.nativeSession(ctx, info)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
 	c.logf("Location DVT native: clear")
 	return client.ClearLocation(ctx)
 }
@@ -201,11 +213,10 @@ func (c *Client) runNativeRoute(ctx context.Context, info iostunnel.TunnelInfo, 
 	if tick <= 0 {
 		tick = time.Second
 	}
-	client, err := c.openNativeDVT(ctx, info)
+	client, err := c.nativeSession(ctx, info)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
 	c.logf("Location DVT native: play route points=%d tick=%s", len(points), tick)
 	for index, point := range points {
 		if err := client.SetLocation(ctx, point.Lat, point.Lon); err != nil {
@@ -220,6 +231,53 @@ func (c *Client) runNativeRoute(ctx context.Context, info iostunnel.TunnelInfo, 
 		}
 	}
 	return nil
+}
+
+func (c *Client) nativeSession(ctx context.Context, info iostunnel.TunnelInfo) (*dtx.Client, error) {
+	c.sessionMu.Lock()
+	if c.sessions == nil {
+		c.sessions = make(map[string]*nativeSession)
+	}
+	if session := c.sessions[info.UDID]; session != nil &&
+		session.rsdAddress == info.RSDAddress &&
+		session.rsdPort == info.RSDPort {
+		client := session.client
+		c.sessionMu.Unlock()
+		return client, nil
+	}
+	c.sessionMu.Unlock()
+
+	c.closeNativeSession(info.UDID)
+	client, err := c.openNativeDVT(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+
+	c.sessionMu.Lock()
+	if existing := c.sessions[info.UDID]; existing != nil &&
+		existing.rsdAddress == info.RSDAddress &&
+		existing.rsdPort == info.RSDPort {
+		c.sessionMu.Unlock()
+		_ = client.Close()
+		return existing.client, nil
+	}
+	c.sessions[info.UDID] = &nativeSession{
+		client:     client,
+		rsdAddress: info.RSDAddress,
+		rsdPort:    info.RSDPort,
+	}
+	c.sessionMu.Unlock()
+	return client, nil
+}
+
+func (c *Client) closeNativeSession(udid string) {
+	c.sessionMu.Lock()
+	session := c.sessions[udid]
+	delete(c.sessions, udid)
+	c.sessionMu.Unlock()
+	if session != nil {
+		_ = session.client.Close()
+	}
 }
 
 func (c *Client) openNativeDVT(ctx context.Context, info iostunnel.TunnelInfo) (*dtx.Client, error) {
