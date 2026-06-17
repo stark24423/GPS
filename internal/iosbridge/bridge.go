@@ -40,8 +40,12 @@ func (b *Bridge) SetLogger(logger func(format string, args ...any)) {
 
 func (b *Bridge) SetUDID(udid string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	oldUDID := b.udid
 	b.udid = udid
+	b.mu.Unlock()
+	if oldUDID != "" && oldUDID != udid {
+		b.location.CloseSession(oldUDID)
+	}
 }
 
 func (b *Bridge) UDID() string {
@@ -117,7 +121,9 @@ func (b *Bridge) StartTunnel(ctx context.Context) (iostunnel.TunnelInfo, error) 
 }
 
 func (b *Bridge) StopTunnel() error {
-	return b.tunnel.Stop(b.UDID())
+	udid := b.UDID()
+	b.location.CloseSession(udid)
+	return b.tunnel.Stop(udid)
 }
 
 func (b *Bridge) TunnelStatus() []iostunnel.TunnelInfo {

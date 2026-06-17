@@ -95,6 +95,7 @@ func (a *Application) startIPhoneOperation(points, simulationPoints []core.Coord
 func (a *Application) finishIPhoneOperation(name string, err error) {
 	fyne.Do(func() {
 		if err == nil {
+			a.setRunning(false)
 			a.logf("%s: OK", name)
 			a.setStatus(name + " OK")
 			return
@@ -125,6 +126,15 @@ func (a *Application) finishIPhoneOperation(name string, err error) {
 func (a *Application) stop() {
 	a.stopPreview()
 	a.mapView.SetFollowMode(false)
+	a.setRunning(false)
+	a.currentLabel.SetText("Current: stopped")
+	a.stateMu.Lock()
+	current := a.joystickPosition
+	a.stateMu.Unlock()
+	if current != nil {
+		a.mapView.SetCurrentPosition(*current, "Stopped")
+	}
+
 	if a.bridgeSelect.Selected == bridgeIPhone {
 		go func() {
 			err := a.bridge.Stop()
@@ -143,41 +153,38 @@ func (a *Application) stop() {
 		a.logf("Dry-run stop complete. No iPhone location was changed.")
 		a.setStatus("Stopped")
 	}
-
-	a.currentLabel.SetText("Current: stopped")
-	a.stateMu.Lock()
-	current := a.joystickPosition
-	a.stateMu.Unlock()
-	if current != nil {
-		a.mapView.SetCurrentPosition(*current, "Stopped")
-	}
-	a.setRunning(false)
 }
 
 func (a *Application) resetLocation() {
+	if a.resetInFlight.Swap(true) {
+		a.logf("Reset already in progress.")
+		return
+	}
 	a.stopPreview()
 	a.stopJoystick()
 	a.mapView.SetFollowMode(false)
 	a.setRunning(false)
-
-	a.stateMu.Lock()
-	a.joystickPosition = nil
-	a.stateMu.Unlock()
-	a.currentLabel.SetText("Current: reset")
-	a.mapView.ClearCurrentPosition()
+	a.startButton.Disable()
+	a.resetButton.Disable()
 
 	if a.bridgeSelect.Selected != bridgeIPhone {
+		a.resetInFlight.Store(false)
+		a.clearCurrentLocationView()
+		a.startButton.Enable()
+		a.resetButton.Enable()
 		a.logf("Dry-run reset complete. No iPhone location was changed.")
 		a.setStatus("Reset")
 		return
 	}
 	if a.bridge.UDID() == "" {
+		a.resetInFlight.Store(false)
+		a.startButton.Enable()
+		a.resetButton.Enable()
 		dialog.ShowInformation("Missing iPhone", "Select an iPhone before resetting location.", a.window)
 		a.setStatus("No iPhone detected")
 		return
 	}
 
-	a.resetButton.Disable()
 	a.setStatus("Resetting location...")
 	a.logf("Resetting iPhone location: clearing simulated location.")
 	go func() {
@@ -185,6 +192,8 @@ func (a *Application) resetLocation() {
 		defer cancel()
 		err := a.bridge.ClearLocation(ctx)
 		fyne.Do(func() {
+			a.resetInFlight.Store(false)
+			a.startButton.Enable()
 			a.resetButton.Enable()
 			if err != nil {
 				a.logf("Reset iPhone location failed: %s", err)
@@ -192,11 +201,20 @@ func (a *Application) resetLocation() {
 				dialog.ShowError(err, a.window)
 				return
 			}
+			a.clearCurrentLocationView()
 			a.refreshTunnelStatus()
 			a.logf("Reset iPhone location: location cleared; tunnel kept running")
 			a.setStatus("Location reset")
 		})
 	}()
+}
+
+func (a *Application) clearCurrentLocationView() {
+	a.stateMu.Lock()
+	a.joystickPosition = nil
+	a.stateMu.Unlock()
+	a.currentLabel.SetText("Current: reset")
+	a.mapView.ClearCurrentPosition()
 }
 
 func (a *Application) startPreview(points []core.Coordinate) {

@@ -87,6 +87,7 @@ type Application struct {
 	logLines             []string
 
 	tunnelStartInFlight atomic.Bool
+	resetInFlight       atomic.Bool
 	outputDir           string
 	logFilePath         string
 }

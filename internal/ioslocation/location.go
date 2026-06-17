@@ -99,6 +99,10 @@ func (c *Client) ClearLocation(ctx context.Context, udid string) error {
 	return nil
 }
 
+func (c *Client) CloseSession(udid string) {
+	c.closeNativeSession(udid)
+}
+
 func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates <-chan core.Coordinate, tick time.Duration) error {
 	if tick <= 0 {
 		tick = 250 * time.Millisecond
@@ -137,6 +141,7 @@ func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates 
 				continue
 			}
 			if err := client.SetLocation(ctx, latest.Lat, latest.Lon); err != nil {
+				c.closeNativeSession(udid)
 				return fmt.Errorf("stream latest location: %w", err)
 			}
 			dirty = false
@@ -272,6 +277,17 @@ func (c *Client) nativeSession(ctx context.Context, info iostunnel.TunnelInfo) (
 
 func (c *Client) closeNativeSession(udid string) {
 	c.sessionMu.Lock()
+	if udid == "" {
+		sessions := c.sessions
+		c.sessions = make(map[string]*nativeSession)
+		c.sessionMu.Unlock()
+		for _, session := range sessions {
+			if session != nil {
+				_ = session.client.Close()
+			}
+		}
+		return
+	}
 	session := c.sessions[udid]
 	delete(c.sessions, udid)
 	c.sessionMu.Unlock()

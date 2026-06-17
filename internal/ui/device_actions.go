@@ -27,6 +27,7 @@ func (a *Application) refreshDevices() {
 				a.deviceLabel.SetText("Device: no iPhone detected")
 				a.tunnelLabel.SetText("Tunnel: no selected iPhone")
 				a.setStatus("No iPhone detected")
+				a.bridge.SetUDID("")
 				a.deviceSelect.Options = nil
 				a.deviceSelect.ClearSelected()
 				a.deviceSelect.Refresh()
@@ -42,15 +43,20 @@ func (a *Application) refreshDevices() {
 				a.deviceChoices[label] = device.ID
 			}
 			a.deviceSelect.Options = labels
-			a.deviceSelect.SetSelected(labels[0])
+			selected := a.deviceSelect.Selected
+			if _, ok := a.deviceChoices[selected]; !ok {
+				selected = labels[0]
+			}
+			a.deviceSelect.Selected = selected
+			a.bridge.SetUDID(a.deviceChoices[selected])
 			a.deviceSelect.Refresh()
 			a.deviceLabel.SetText("Device: " + strings.Join(labels, ", "))
 			a.refreshTunnelStatus()
 			a.logf("Detected device(s): %s", strings.Join(labels, ", "))
-			if a.bridgeSelect.Selected == bridgeDryRun {
-				a.bridgeSelect.SetSelected(bridgeIPhone)
-			} else {
+			if a.bridgeSelect.Selected == bridgeIPhone {
 				a.setStatus("iPhone ready")
+			} else {
+				a.setStatus("iPhone detected")
 			}
 		})
 	}()
