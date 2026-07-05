@@ -10,9 +10,12 @@ import (
 )
 
 func (a *Application) refreshDevices() {
+	opID := a.nextOperationID("dev")
+	started := time.Now()
 	a.refreshButton.Disable()
 	a.deviceLabel.SetText("Device: scanning...")
 	a.setStatus("Scanning iPhone...")
+	a.logf("[%s] device scan started", opID)
 	go func() {
 		devices, err := a.bridge.ListDevices()
 		fyne.Do(func() {
@@ -20,25 +23,28 @@ func (a *Application) refreshDevices() {
 			if err != nil {
 				a.deviceLabel.SetText("Device: scan failed")
 				a.setStatus("Device scan failed")
-				a.logf("iPhone scan failed: %s", err)
+				a.logf("[%s] iPhone scan failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				return
 			}
 			if len(devices) == 0 {
 				a.deviceLabel.SetText("Device: no iPhone detected")
 				a.tunnelLabel.SetText("Tunnel: no selected iPhone")
 				a.setStatus("No iPhone detected")
+				a.stopLocationKeepAlive()
+				a.stopPreview()
+				a.stopJoystick()
 				a.bridge.SetUDID("")
 				a.deviceSelect.Options = nil
 				a.deviceSelect.ClearSelected()
 				a.deviceSelect.Refresh()
-				a.logf("No iPhone connected. Dry-run remains available.")
+				a.logf("[%s] no iPhone connected after %s; location changes are unavailable until a USB iPhone is selected", opID, time.Since(started).Round(time.Millisecond))
 				return
 			}
 
 			labels := make([]string, 0, len(devices))
 			a.deviceChoices = make(map[string]string, len(devices))
 			for _, device := range devices {
-				label := fmt.Sprintf("%s (%s)", device.Name, device.ID)
+				label := formatDeviceChoiceLabel(device.Name, device.Connection, device.ID)
 				labels = append(labels, label)
 				a.deviceChoices[label] = device.ID
 			}
@@ -47,19 +53,38 @@ func (a *Application) refreshDevices() {
 			if _, ok := a.deviceChoices[selected]; !ok {
 				selected = labels[0]
 			}
+			if a.bridge.UDID() != a.deviceChoices[selected] {
+				a.stopLocationKeepAlive()
+				a.stopPreview()
+				a.stopJoystick()
+			}
 			a.deviceSelect.Selected = selected
 			a.bridge.SetUDID(a.deviceChoices[selected])
 			a.deviceSelect.Refresh()
 			a.deviceLabel.SetText("Device: " + strings.Join(labels, ", "))
 			a.refreshTunnelStatus()
-			a.logf("Detected device(s): %s", strings.Join(labels, ", "))
-			if a.bridgeSelect.Selected == bridgeIPhone {
-				a.setStatus("iPhone ready")
-			} else {
-				a.setStatus("iPhone detected")
-			}
+			a.logf("[%s] detected device(s) after %s: %s", opID, time.Since(started).Round(time.Millisecond), strings.Join(labels, ", "))
+			a.setStatus("iPhone ready")
+			a.startTunnelForSelected(false)
 		})
 	}()
+}
+
+func formatDeviceChoiceLabel(name, connection, id string) string {
+	return fmt.Sprintf("%s [%s] (%s)", name, displayDeviceConnection(connection), id)
+}
+
+func displayDeviceConnection(connection string) string {
+	switch strings.ToLower(strings.TrimSpace(connection)) {
+	case "usb":
+		return "USB"
+	case "network", "wifi", "wi-fi", "wireless":
+		return "Wi-Fi"
+	case "":
+		return "Unknown"
+	default:
+		return connection
+	}
 }
 
 func (a *Application) startTunnel() {
@@ -67,20 +92,17 @@ func (a *Application) startTunnel() {
 }
 
 func (a *Application) startTunnelForSelected(showDialog bool) {
+	opID := a.nextOperationID("tun")
+	started := time.Now()
 	if a.bridge.UDID() == "" {
+		a.logf("[%s] tunnel start rejected: no selected iPhone", opID)
 		if showDialog {
 			dialog.ShowInformation("Missing iPhone", "Select an iPhone before starting the tunnel.", a.window)
 		}
 		return
 	}
 	if a.tunnelStartInFlight.Swap(true) {
-		a.logf("Tunnel start already in progress.")
-		return
-	}
-	if a.selectedTunnelActive() {
-		a.tunnelStartInFlight.Store(false)
-		a.refreshTunnelStatus()
-		a.logf("Tunnel already active for selected iPhone.")
+		a.logf("[%s] tunnel start ignored: already in progress", opID)
 		return
 	}
 	if showDialog {
@@ -88,7 +110,7 @@ func (a *Application) startTunnelForSelected(showDialog bool) {
 	}
 	a.tunnelLabel.SetText("Tunnel: starting...")
 	a.setStatus("Starting tunnel...")
-	a.logf("Starting built-in Go tunnel for selected iPhone.")
+	a.logf("[%s] starting built-in Go tunnel for selected iPhone", opID)
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -99,7 +121,7 @@ func (a *Application) startTunnelForSelected(showDialog bool) {
 			if err != nil {
 				a.tunnelLabel.SetText("Tunnel: " + err.Error())
 				a.setStatus("Tunnel error")
-				a.logf("Start tunnel failed: %s", err)
+				a.logf("[%s] start tunnel failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				if showDialog {
 					dialog.ShowError(err, a.window)
 				}
@@ -116,6 +138,7 @@ func (a *Application) startTunnelForSelected(showDialog bool) {
 				info.MTU,
 				info.Message,
 			)
+			a.logf("[%s] tunnel ready after %s", opID, time.Since(started).Round(time.Millisecond))
 		})
 	}()
 }
@@ -134,18 +157,20 @@ func (a *Application) selectedTunnelActive() bool {
 }
 
 func (a *Application) stopTunnel() {
-	a.logf("Stopping built-in Go tunnel.")
+	opID := a.nextOperationID("tun-stop")
+	started := time.Now()
+	a.logf("[%s] stopping built-in Go tunnel", opID)
 	go func() {
 		err := a.bridge.StopTunnel()
 		fyne.Do(func() {
 			if err != nil {
-				a.logf("Stop tunnel failed: %s", err)
+				a.logf("[%s] stop tunnel failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				dialog.ShowError(err, a.window)
 				return
 			}
 			a.tunnelLabel.SetText("Tunnel: stopped")
 			a.setStatus("Tunnel stopped")
-			a.logf("Tunnel stopped.")
+			a.logf("[%s] tunnel stopped after %s", opID, time.Since(started).Round(time.Millisecond))
 		})
 	}()
 }

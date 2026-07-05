@@ -148,7 +148,7 @@ func (b *Bridge) PlayRoute(ctx context.Context, points []core.Coordinate, tick t
 		return fmt.Errorf("at least one coordinate is required")
 	}
 	if tick <= 0 {
-		tick = time.Second
+		tick = core.DefaultRouteTick
 	}
 	udid := b.UDID()
 	if udid == "" {
@@ -184,7 +184,11 @@ func (b *Bridge) Stop() error {
 
 func (b *Bridge) ClearLocation(ctx context.Context) error {
 	b.stopPlayback()
-	return b.location.ClearLocation(ctx, b.UDID())
+	udid := b.UDID()
+	if udid == "" {
+		return fmt.Errorf("select an iPhone before resetting location")
+	}
+	return b.location.ClearLocation(ctx, udid)
 }
 
 func (b *Bridge) stopPlayback() {

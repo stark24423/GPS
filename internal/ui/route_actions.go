@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +23,12 @@ func (a *Application) resolveLocationFromInput() {
 }
 
 func (a *Application) applyInputLocation(action string) {
+	opID := a.nextOperationID("loc")
+	started := time.Now()
 	query := strings.TrimSpace(a.locationEntry.Text)
+	a.logf("[%s] location input action=%s query_len=%d", opID, action, len(query))
 	if query == "" {
+		a.logf("[%s] rejected: empty location input", opID)
 		dialog.ShowInformation("缺少定位資料", "請輸入地址或 GPS 座標。", a.window)
 		return
 	}
@@ -36,9 +41,11 @@ func (a *Application) applyInputLocation(action string) {
 			a.setLocationButtonsEnabled(true)
 			if err != nil {
 				a.setStatus("Location lookup failed")
+				a.logf("[%s] location lookup failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				dialog.ShowError(err, a.window)
 				return
 			}
+			a.logf("[%s] location lookup OK after %s label=%q lat=%.6f lon=%.6f", opID, time.Since(started).Round(time.Millisecond), compactLogText(label, 120), point.Lat, point.Lon)
 			a.applyResolvedLocation(action, point, label)
 		})
 	}()
@@ -65,7 +72,7 @@ func (a *Application) applyResolvedLocation(action string, point core.Coordinate
 }
 
 func (a *Application) setLocationButtonsEnabled(enabled bool) {
-	buttons := []*widget.Button{a.resolveButton, a.setSingleButton, a.addRouteButton, a.applyNowButton}
+	buttons := []*widget.Button{a.resolveButton, a.setSingleButton, a.addRouteButton, a.planRouteButton, a.applyNowButton}
 	for _, button := range buttons {
 		if enabled {
 			button.Enable()
@@ -90,6 +97,7 @@ func (a *Application) addPoint(point core.Coordinate) {
 	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", point.Lat, point.Lon))
 	a.mapView.SetPoints(points)
 	a.mapView.SetCurrentPosition(point, "Selected")
+	a.refreshRouteSpeedSummary()
 	a.logf("Added point: %.6f, %.6f", point.Lat, point.Lon)
 }
 
@@ -106,6 +114,7 @@ func (a *Application) clearPoints() {
 	a.mapView.SetFollowMode(false)
 	a.mapView.ClearPoints()
 	a.mapView.ClearCurrentPosition()
+	a.refreshRouteSpeedSummary()
 	a.setStatus("Idle")
 	a.logf("Cleared points.")
 }
@@ -131,6 +140,7 @@ func (a *Application) removeLastPoint() {
 		a.currentLabel.SetText("Current: -")
 		a.mapView.ClearCurrentPosition()
 	}
+	a.refreshRouteSpeedSummary()
 	a.logf("Removed point: %.6f, %.6f", removed.Lat, removed.Lon)
 }
 
@@ -217,6 +227,7 @@ func (a *Application) applyLoadedRoute(points []core.Coordinate) {
 	a.mapView.SetPoints(points)
 	a.mapView.SetCurrentPosition(last, "Loaded")
 	a.mapView.CenterOn(last)
+	a.refreshRouteSpeedSummary()
 }
 
 func (a *Application) keepOnlyLastPoint() {
@@ -232,6 +243,7 @@ func (a *Application) keepOnlyLastPoint() {
 	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
 	a.mapView.SetPoints([]core.Coordinate{last})
 	a.mapView.SetCurrentPosition(last, "Selected")
+	a.refreshRouteSpeedSummary()
 	a.logf("Single point mode keeps only the latest point.")
 }
 
@@ -247,6 +259,75 @@ func (a *Application) selectedPoints() []core.Coordinate {
 	return append([]core.Coordinate(nil), a.points...)
 }
 
+func (a *Application) updateRouteControls() {
+	a.stateMu.Lock()
+	running := a.running
+	a.stateMu.Unlock()
+	if running {
+		a.speedSlider.Disable()
+		a.jitterSlider.Disable()
+		return
+	}
+	if a.modeSelect.Selected == modeRoute {
+		a.speedSlider.Enable()
+		a.jitterSlider.Enable()
+	} else {
+		a.speedSlider.Disable()
+		a.jitterSlider.Disable()
+	}
+	a.refreshRouteSpeedSummary()
+}
+
+func (a *Application) refreshRouteSpeedSummary() {
+	if a.routeSpeedSummary == nil {
+		return
+	}
+	points := a.selectedPoints()
+	if a.modeSelect == nil || a.modeSelect.Selected != modeRoute {
+		a.routeSpeedSummary.SetText("Route speed applies when Route mode is selected.")
+		return
+	}
+	if len(points) < 2 {
+		a.routeSpeedSummary.SetText("Add at least two route points to estimate playback time.")
+		return
+	}
+	distanceMeters := routeDistanceMeters(points)
+	speedKmh := a.speedSlider.Value
+	duration := estimatedRouteDuration(distanceMeters, speedKmh)
+	a.routeSpeedSummary.SetText(fmt.Sprintf("Route %.2f km at %.1f km/h: about %s", distanceMeters/1000, speedKmh, compactDuration(duration)))
+}
+
+func routeDistanceMeters(points []core.Coordinate) float64 {
+	var total float64
+	for i := 1; i < len(points); i++ {
+		total += core.HaversineDistanceMeters(points[i-1], points[i])
+	}
+	return total
+}
+
+func estimatedRouteDuration(distanceMeters, speedKmh float64) time.Duration {
+	if distanceMeters <= 0 || speedKmh <= 0 {
+		return 0
+	}
+	return time.Duration(distanceMeters/(speedKmh*1000/3600)) * time.Second
+}
+
+func compactDuration(duration time.Duration) string {
+	duration = duration.Round(time.Second)
+	if duration < time.Minute {
+		return duration.String()
+	}
+	hours := int(duration / time.Hour)
+	duration -= time.Duration(hours) * time.Hour
+	minutes := int(duration / time.Minute)
+	duration -= time.Duration(minutes) * time.Minute
+	seconds := int(duration / time.Second)
+	if hours > 0 {
+		return fmt.Sprintf("%dh%02dm%02ds", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
+}
+
 func resolveLocation(query string) (core.Coordinate, string, error) {
 	if point, ok := parseCoordinate(query); ok {
 		label := fmt.Sprintf("%.6f, %.6f", point.Lat, point.Lon)
@@ -256,21 +337,52 @@ func resolveLocation(query string) (core.Coordinate, string, error) {
 }
 
 func parseCoordinate(text string) (core.Coordinate, bool) {
-	normalized := strings.NewReplacer("，", ",", " ", ",", "\t", ",", "\n", ",").Replace(text)
-	parts := strings.Split(normalized, ",")
+	tokens := strings.FieldsFunc(normalizeCoordinateText(text), func(r rune) bool {
+		return r == ',' || r == ';' || r == '\u00b0' || r == '\t' || r == '\n' || r == '\r' || r == ' '
+	})
 	values := make([]float64, 0, 2)
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
+	hemispheres := make([]bool, 0, 2)
+	pendingHemisphere := ""
+	for _, token := range tokens {
+		token = strings.TrimSpace(strings.Trim(token, "()[]{}"))
+		if token == "" {
 			continue
 		}
-		value, err := strconv.ParseFloat(part, 64)
+
+		if isHemisphere(token) {
+			if len(values) > 0 && !hemispheres[len(hemispheres)-1] {
+				values[len(values)-1] = applyHemisphere(values[len(values)-1], token)
+				hemispheres[len(hemispheres)-1] = true
+				continue
+			}
+			if pendingHemisphere != "" {
+				return core.Coordinate{}, false
+			}
+			pendingHemisphere = strings.ToUpper(token)
+			continue
+		}
+
+		match := coordinateTokenPattern.FindStringSubmatch(token)
+		if match == nil {
+			return core.Coordinate{}, false
+		}
+		hemisphere := strings.ToUpper(match[1] + match[3])
+		if pendingHemisphere != "" {
+			if hemisphere != "" {
+				return core.Coordinate{}, false
+			}
+			hemisphere = pendingHemisphere
+			pendingHemisphere = ""
+		}
+		value, err := strconv.ParseFloat(match[2], 64)
 		if err != nil {
 			return core.Coordinate{}, false
 		}
+		value = applyHemisphere(value, hemisphere)
 		values = append(values, value)
+		hemispheres = append(hemispheres, hemisphere != "")
 	}
-	if len(values) != 2 {
+	if len(values) != 2 || pendingHemisphere != "" {
 		return core.Coordinate{}, false
 	}
 	lat, lon := values[0], values[1]
@@ -278,6 +390,48 @@ func parseCoordinate(text string) (core.Coordinate, bool) {
 		return core.Coordinate{}, false
 	}
 	return core.Coordinate{Lat: lat, Lon: lon}, true
+}
+
+var coordinateTokenPattern = regexp.MustCompile(`(?i)^([NSEW])?([+-]?\d+(?:\.\d+)?)(?:\x{00b0})?([NSEW])?$`)
+
+func normalizeCoordinateText(text string) string {
+	return strings.NewReplacer(
+		"\u2212", "-",
+		"\uff0d", "-",
+		"\ufe63", "-",
+		"\u2013", "-",
+		"\u2014", "-",
+		"\uff0c", ",",
+		"\u3001", ",",
+		";", ",",
+	).Replace(text)
+}
+
+func absFloat(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func isHemisphere(token string) bool {
+	switch strings.ToUpper(token) {
+	case "N", "S", "E", "W":
+		return true
+	default:
+		return false
+	}
+}
+
+func applyHemisphere(value float64, hemisphere string) float64 {
+	switch strings.ToUpper(hemisphere) {
+	case "S", "W":
+		return -absFloat(value)
+	case "N", "E":
+		return absFloat(value)
+	default:
+		return value
+	}
 }
 
 func geocodeAddress(query string) (core.Coordinate, string, error) {

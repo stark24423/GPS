@@ -51,3 +51,16 @@ func TestMapWidgetTappedScalesEventPositionToRenderedPixels(t *testing.T) {
 		t.Fatalf("expected scaled tap coordinate %+v, got lat=%f lon=%f", expected, gotLat, gotLon)
 	}
 }
+
+func TestWorldToLatLonWrapsLongitude(t *testing.T) {
+	_, lon := worldToLatLon(0, 0, minZoom)
+	scale := float64(tileSize * (int(1) << minZoom))
+	_, wrappedLon := worldToLatLon(scale*(257.404162+180)/360, 0, minZoom)
+
+	if lon != -180 {
+		t.Fatalf("left edge longitude = %f, want -180", lon)
+	}
+	if math.Abs(wrappedLon-(-102.595838)) > 0.000001 {
+		t.Fatalf("wrapped longitude = %f, want -102.595838", wrappedLon)
+	}
+}

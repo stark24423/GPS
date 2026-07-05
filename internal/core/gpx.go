@@ -49,7 +49,7 @@ type gpxTrackPoint struct {
 }
 
 func BuildTimedPoints(points []Coordinate, speedKmh, jitterMeters float64) ([]TimedPoint, error) {
-	timed, err := BuildTimedRoute(points, speedKmh, time.Now().UTC(), time.Second)
+	timed, err := BuildTimedRoute(points, speedKmh, time.Now().UTC(), DefaultRouteTick)
 	if err != nil {
 		return nil, err
 	}

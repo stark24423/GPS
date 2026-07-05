@@ -18,6 +18,11 @@ import (
 	"time"
 )
 
+const (
+	logFileMaxBytes = 5 * 1024 * 1024
+	logFileBackups  = 3
+)
+
 func (a *Application) openOutputFolder() {
 	if err := os.MkdirAll(a.outputDir, 0755); err != nil {
 		dialog.ShowError(err, a.window)
@@ -47,7 +52,6 @@ func (a *Application) setRunning(running bool) {
 		a.stopButton.Enable()
 		a.clearButton.Disable()
 		a.modeSelect.Disable()
-		a.bridgeSelect.Disable()
 		a.speedSlider.Disable()
 		a.jitterSlider.Disable()
 		a.mapView.SetEditingLocked(true)
@@ -59,9 +63,7 @@ func (a *Application) setRunning(running bool) {
 	a.stopButton.Disable()
 	a.clearButton.Enable()
 	a.modeSelect.Enable()
-	a.bridgeSelect.Enable()
-	a.speedSlider.Enable()
-	a.jitterSlider.Enable()
+	a.updateRouteControls()
 	a.mapView.SetEditingLocked(false)
 	a.setStatus("Idle")
 }
@@ -79,9 +81,13 @@ func statusColor(status string) color.Color {
 	switch {
 	case strings.Contains(normalized, "error"), strings.Contains(normalized, "failed"):
 		return color.NRGBA{R: 220, G: 38, B: 38, A: 255}
-	case strings.Contains(normalized, "starting"), strings.Contains(normalized, "scanning"), strings.Contains(normalized, "running"), strings.Contains(normalized, "active"):
+	case strings.Contains(normalized, "starting"), strings.Contains(normalized, "scanning"), strings.Contains(normalized, "running"), strings.Contains(normalized, "active"),
+		strings.Contains(normalized, "checking"), strings.Contains(normalized, "finding"), strings.Contains(normalized, "opening"),
+		strings.Contains(normalized, "creating"), strings.Contains(normalized, "waiting"), strings.Contains(normalized, "connecting"),
+		strings.Contains(normalized, "sending"), strings.Contains(normalized, "discovering"), strings.Contains(normalized, "probing"):
 		return color.NRGBA{R: 37, G: 99, B: 235, A: 255}
-	case strings.Contains(normalized, "warn"), strings.Contains(normalized, "pending"), strings.Contains(normalized, "no iphone"), strings.Contains(normalized, "stopped"):
+	case strings.Contains(normalized, "warn"), strings.Contains(normalized, "pending"), strings.Contains(normalized, "no iphone"), strings.Contains(normalized, "stopped"),
+		strings.Contains(normalized, "retry"), strings.Contains(normalized, "rebuilding"), strings.Contains(normalized, "slow"):
 		return color.NRGBA{R: 217, G: 119, B: 6, A: 255}
 	case strings.Contains(normalized, "ready"), strings.Contains(normalized, "ok"), strings.Contains(normalized, "arrived"):
 		return color.NRGBA{R: 22, G: 163, B: 74, A: 255}
@@ -95,7 +101,9 @@ func statusIdleColor() color.Color {
 }
 
 func (a *Application) logf(format string, args ...interface{}) {
-	line := fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+	message := fmt.Sprintf(format, args...)
+	a.setStatusFromBridgeLog(message)
+	line := fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), message)
 	a.writeLogLine(line)
 	fyne.Do(func() {
 		a.logMu.Lock()
@@ -108,18 +116,159 @@ func (a *Application) logf(format string, args ...interface{}) {
 	})
 }
 
+func (a *Application) nextOperationID(prefix string) string {
+	return fmt.Sprintf("%s-%06d", prefix, a.operationSeq.Add(1))
+}
+
+func (a *Application) logOperationDone(opID string, started time.Time, err error) {
+	if err != nil {
+		a.logf("[%s] failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
+		return
+	}
+	a.logf("[%s] completed in %s", opID, time.Since(started).Round(time.Millisecond))
+}
+
+func (a *Application) setOperationCancel(opID string, cancel context.CancelFunc) {
+	a.stateMu.Lock()
+	previous := a.operationCancel
+	a.operationID = opID
+	a.operationCancel = cancel
+	a.stateMu.Unlock()
+	if previous != nil {
+		previous()
+	}
+}
+
+func (a *Application) clearOperationCancel(opID string) {
+	a.stateMu.Lock()
+	if a.operationID == opID {
+		a.operationID = ""
+		a.operationCancel = nil
+	}
+	a.stateMu.Unlock()
+}
+
+func (a *Application) cancelCurrentOperation() {
+	a.stateMu.Lock()
+	cancel := a.operationCancel
+	opID := a.operationID
+	a.operationID = ""
+	a.operationCancel = nil
+	a.stateMu.Unlock()
+	if cancel != nil {
+		a.logf("[%s] cancellation requested", opID)
+		cancel()
+	}
+}
+
+func (a *Application) setStatusFromBridgeLog(message string) {
+	status, ok := bridgeLogStatus(message)
+	if !ok {
+		return
+	}
+	fyne.Do(func() {
+		a.setStatus(status)
+	})
+}
+
+func bridgeLogStatus(message string) (string, bool) {
+	normalized := strings.ToLower(message)
+	switch {
+	case strings.Contains(normalized, "tunnel start already in progress"):
+		return "Tunnel: waiting for current start", true
+	case strings.Contains(normalized, "tunnel discovery requested"):
+		return "Tunnel: starting", true
+	case strings.Contains(normalized, "tunnel already active"):
+		return "Tunnel ready", true
+	case strings.Contains(normalized, "tunnel preflight"):
+		return "Tunnel: checking requirements", true
+	case strings.Contains(normalized, "searching usb device"):
+		return "Tunnel: finding iPhone", true
+	case strings.Contains(normalized, "device found"):
+		return "Tunnel: iPhone found", true
+	case strings.Contains(normalized, "connecting lockdown"):
+		return "Tunnel: connecting lockdown", true
+	case strings.Contains(normalized, "starting coredeviceproxy"):
+		return "Tunnel: opening CoreDevice", true
+	case strings.Contains(normalized, "exchanging coredevice"):
+		return "Tunnel: negotiating tunnel", true
+	case strings.Contains(normalized, "rsd ready"):
+		return "Tunnel: RSD discovered", true
+	case strings.Contains(normalized, "creating wintun"):
+		return "Tunnel: creating Wintun", true
+	case strings.Contains(normalized, "waiting for rsd tcp"):
+		return "Tunnel: probing RSD", true
+	case strings.Contains(normalized, "rsd tcp reachable"):
+		return "Tunnel: RSD reachable", true
+	case strings.Contains(normalized, "tunnel discovery complete"):
+		return "Tunnel ready", true
+	case strings.Contains(normalized, "rebuilding tunnel"):
+		return "Tunnel: rebuilding", true
+	case strings.Contains(normalized, "location rsd native: discovering"):
+		return "Location: discovering DVT", true
+	case strings.Contains(normalized, "location dvt native: connecting"):
+		return "Location: connecting DVT", true
+	case strings.Contains(normalized, "location dvt native: set"):
+		return "Location: sending point", true
+	case strings.Contains(normalized, "location keepalive started"):
+		return "Location: keepalive active", true
+	case strings.Contains(normalized, "location keepalive ok"):
+		return "Location: keepalive OK", true
+	case strings.Contains(normalized, "location keepalive failed"):
+		return "Location: keepalive error", true
+	case strings.Contains(normalized, "location dvt native: clear"):
+		return "Location: clearing", true
+	case strings.Contains(normalized, "location dvt native: play route"):
+		return "Location: playing route", true
+	case strings.Contains(normalized, "route ui tracker started"):
+		return "Location: route UI tracking", true
+	case strings.Contains(normalized, "location dvt native: route send slow"):
+		return "Location: DVT slow", true
+	case strings.Contains(normalized, "location dvt native: stream"):
+		return "Location: streaming", true
+	default:
+		return "", false
+	}
+}
+
 func (a *Application) writeLogLine(line string) {
 	a.logMu.Lock()
 	defer a.logMu.Unlock()
 	if err := os.MkdirAll(a.outputDir, 0755); err != nil {
 		return
 	}
+	_ = rotateLogFile(a.logFilePath, logFileMaxBytes, logFileBackups)
 	file, err := os.OpenFile(a.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return
 	}
 	defer file.Close()
 	_, _ = file.WriteString(line + "\n")
+}
+
+func rotateLogFile(path string, maxBytes int64, backups int) error {
+	if maxBytes <= 0 || backups <= 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Size() < maxBytes {
+		return nil
+	}
+	_ = os.Remove(fmt.Sprintf("%s.%d", path, backups))
+	for i := backups - 1; i >= 1; i-- {
+		oldPath := fmt.Sprintf("%s.%d", path, i)
+		newPath := fmt.Sprintf("%s.%d", path, i+1)
+		if _, err := os.Stat(oldPath); err == nil {
+			_ = os.Rename(oldPath, newPath)
+		}
+	}
+	return os.Rename(path, fmt.Sprintf("%s.1", path))
 }
 
 func (a *Application) openLogWindow() {
@@ -166,4 +315,15 @@ func compactError(err error) string {
 		return text
 	}
 	return text[:320] + "..."
+}
+
+func compactLogText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= limit {
+		return text
+	}
+	if limit < 4 {
+		return text[:limit]
+	}
+	return text[:limit-3] + "..."
 }

@@ -58,16 +58,16 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	locationSection := compactSection("定位", container.NewVBox(
 		widget.NewForm(
 			widget.NewFormItem("模式", a.modeSelect),
-			widget.NewFormItem("輸出", a.bridgeSelect),
 		),
 		a.locationEntry,
 		buttonGrid(3, a.resolveButton, a.setSingleButton, a.addRouteButton),
-		container.NewPadded(a.applyNowButton),
+		buttonGrid(2, a.planRouteButton, a.applyNowButton),
 	))
 
 	moveSection := compactSection("移動", container.NewVBox(
 		labeledSlider("路線速度", a.speedSlider, a.speedLabel),
 		labeledSlider("飄移", a.jitterSlider, a.jitterLabel),
+		a.routeSpeedSummary,
 		buttonGrid(3, a.startButton, a.stopButton, a.resetButton),
 	))
 

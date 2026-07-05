@@ -19,7 +19,10 @@ import (
 	"gpssim/internal/iostunnel/wintun"
 )
 
-const minimumIOSVersion = "17.4"
+const (
+	minimumIOSVersion        = "17.4"
+	activeTunnelProbeTimeout = 1500 * time.Millisecond
+)
 
 var (
 	ErrUnsupportedPlatform  = errors.New("built-in Go tunnel currently supports Windows only")
@@ -41,18 +44,27 @@ type TunnelInfo struct {
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	mux     *usbmux.Client
-	active  map[string]*activeTunnel
-	wintun  wintun.Loader
-	isAdmin func() bool
-	logger  func(format string, args ...any)
+	mu       sync.Mutex
+	mux      *usbmux.Client
+	active   map[string]*activeTunnel
+	starting map[string]*startWait
+	wintun   wintun.Loader
+	isAdmin  func() bool
+	logger   func(format string, args ...any)
+}
+
+type startWait struct {
+	done chan struct{}
+	info TunnelInfo
+	err  error
 }
 
 type activeTunnel struct {
 	info   TunnelInfo
 	cancel context.CancelFunc
 	done   chan struct{}
+	lost   chan struct{}
+	lostMu sync.Once
 	tun    wintun.Device
 	stream net.Conn
 	client *lockdown.Client
@@ -60,10 +72,11 @@ type activeTunnel struct {
 
 func NewManager() *Manager {
 	return &Manager{
-		mux:     usbmux.New(""),
-		active:  make(map[string]*activeTunnel),
-		wintun:  wintun.SystemLoader{},
-		isAdmin: IsAdministrator,
+		mux:      usbmux.New(""),
+		active:   make(map[string]*activeTunnel),
+		starting: make(map[string]*startWait),
+		wintun:   wintun.SystemLoader{},
+		isAdmin:  IsAdministrator,
 	}
 }
 
@@ -74,12 +87,76 @@ func (m *Manager) SetLogger(logger func(format string, args ...any)) {
 }
 
 func (m *Manager) Start(ctx context.Context, udid string) (TunnelInfo, error) {
-	startedAt := time.Now()
-	m.logf("Tunnel discovery requested: udid=%s", udid)
+	wait, owner, err := m.beginStart(ctx, udid)
+	if err != nil {
+		return TunnelInfo{}, err
+	}
+	if !owner {
+		return waitForStart(ctx, wait)
+	}
+
+	info, err := m.startNewTunnel(ctx, udid)
+	m.finishStart(udid, wait, info, err)
+	return info, err
+}
+
+func (m *Manager) beginStart(ctx context.Context, udid string) (*startWait, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if udid == "" {
 		m.logf("Tunnel discovery failed: missing UDID")
-		return TunnelInfo{}, fmt.Errorf("UDID is required")
+		return nil, false, fmt.Errorf("UDID is required")
 	}
+	for {
+		m.mu.Lock()
+		if wait := m.starting[udid]; wait != nil {
+			m.mu.Unlock()
+			m.logf("Tunnel start already in progress; waiting for selected iPhone.")
+			return wait, false, nil
+		}
+		if active, ok := m.active[udid]; ok {
+			info := active.info
+			m.mu.Unlock()
+			if err := m.probeRSD(ctx, info, activeTunnelProbeTimeout); err == nil {
+				m.logf("Tunnel already active and healthy: state=%s rsd=%s:%d", info.State, info.RSDAddress, info.RSDPort)
+				wait := &startWait{done: make(chan struct{}), info: info}
+				close(wait.done)
+				return wait, false, nil
+			} else {
+				m.logf("Tunnel active entry is stale, rebuilding: %s", err)
+				_ = m.Stop(udid)
+				continue
+			}
+		}
+		wait := &startWait{done: make(chan struct{})}
+		m.starting[udid] = wait
+		m.mu.Unlock()
+		return wait, true, nil
+	}
+}
+
+func waitForStart(ctx context.Context, wait *startWait) (TunnelInfo, error) {
+	select {
+	case <-ctx.Done():
+		return TunnelInfo{}, ctx.Err()
+	case <-wait.done:
+		return wait.info, wait.err
+	}
+}
+
+func (m *Manager) finishStart(udid string, wait *startWait, info TunnelInfo, err error) {
+	m.mu.Lock()
+	wait.info = info
+	wait.err = err
+	delete(m.starting, udid)
+	close(wait.done)
+	m.mu.Unlock()
+}
+
+func (m *Manager) startNewTunnel(ctx context.Context, udid string) (TunnelInfo, error) {
+	startedAt := time.Now()
+	m.logf("Tunnel discovery requested: udid=%s", udid)
 	if runtime.GOOS != "windows" {
 		m.logf("Tunnel discovery failed: unsupported platform=%s", runtime.GOOS)
 		return TunnelInfo{}, ErrUnsupportedPlatform
@@ -95,14 +172,6 @@ func (m *Manager) Start(ctx context.Context, udid string) (TunnelInfo, error) {
 		return TunnelInfo{}, ErrAdminRequired
 	}
 	m.logf("Tunnel preflight: administrator privileges confirmed")
-	m.mu.Lock()
-	if active, ok := m.active[udid]; ok {
-		info := active.info
-		m.mu.Unlock()
-		m.logf("Tunnel already active: state=%s rsd=%s:%d", info.State, info.RSDAddress, info.RSDPort)
-		return info, nil
-	}
-	m.mu.Unlock()
 
 	m.logf("Tunnel discovery: searching USB device")
 	device, values, err := m.findDevice(ctx, udid)
@@ -181,6 +250,7 @@ func (m *Manager) Start(ctx context.Context, udid string) (TunnelInfo, error) {
 		info:   info,
 		cancel: cancel,
 		done:   make(chan struct{}),
+		lost:   make(chan struct{}),
 		tun:    tun,
 		stream: stream,
 		client: client,
@@ -189,18 +259,63 @@ func (m *Manager) Start(ctx context.Context, udid string) (TunnelInfo, error) {
 	m.active[udid] = active
 	m.mu.Unlock()
 	go m.forwardLoop(tunnelCtx, active)
+	if err := m.waitForRSD(ctx, info, 8*time.Second); err != nil {
+		m.logf("Tunnel readiness failed: %s", err)
+		_ = m.Stop(info.UDID)
+		return TunnelInfo{}, err
+	}
 	m.logf("Tunnel discovery complete in %s: state=%s", time.Since(startedAt).Round(time.Millisecond), info.State)
 	return info, nil
 }
 
-func (m *Manager) EnsureRunning(ctx context.Context, udid string) (TunnelInfo, error) {
-	m.mu.Lock()
-	if info, ok := m.active[udid]; ok {
-		m.mu.Unlock()
-		return info.info, nil
+func (m *Manager) waitForRSD(ctx context.Context, info TunnelInfo, timeout time.Duration) error {
+	m.logf("Tunnel readiness: waiting for RSD TCP %s:%d", info.RSDAddress, info.RSDPort)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		if err := m.probeRSD(ctx, info, 750*time.Millisecond); err == nil {
+			m.logf("Tunnel readiness: RSD TCP reachable")
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("RSD TCP was not reachable after %s: %w", timeout, lastErr)
+		case <-ticker.C:
+		}
 	}
-	m.mu.Unlock()
+}
+
+func (m *Manager) probeRSD(ctx context.Context, info TunnelInfo, timeout time.Duration) error {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", net.JoinHostPort(info.RSDAddress, fmt.Sprint(info.RSDPort)))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func (m *Manager) EnsureRunning(ctx context.Context, udid string) (TunnelInfo, error) {
 	return m.Start(ctx, udid)
+}
+
+func (m *Manager) Lost(info TunnelInfo) (<-chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	active, ok := m.active[info.UDID]
+	if !ok || !sameTunnel(active.info, info) {
+		closed := make(chan struct{})
+		close(closed)
+		return closed, false
+	}
+	return active.lost, true
 }
 
 func (m *Manager) Info(udid string) (TunnelInfo, bool) {
@@ -316,6 +431,29 @@ func parseVersion(version string) [3]int {
 	return out
 }
 
+func sameTunnel(a, b TunnelInfo) bool {
+	return a.UDID == b.UDID &&
+		a.InterfaceName == b.InterfaceName &&
+		a.RSDAddress == b.RSDAddress &&
+		a.RSDPort == b.RSDPort &&
+		a.StartedAt.Equal(b.StartedAt)
+}
+
+func markLost(active *activeTunnel) {
+	active.lostMu.Do(func() {
+		close(active.lost)
+	})
+}
+
+func isLost(active *activeTunnel) bool {
+	select {
+	case <-active.lost:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Manager) logf(format string, args ...any) {
 	m.mu.Lock()
 	logger := m.logger
@@ -328,8 +466,8 @@ func (m *Manager) logf(format string, args ...any) {
 func (m *Manager) forwardLoop(ctx context.Context, active *activeTunnel) {
 	defer func() {
 		close(active.done)
-		if ctx.Err() == nil {
-			m.dropActive(active.info.UDID)
+		if ctx.Err() == nil || isLost(active) {
+			m.dropActive(active)
 			if active.tun != nil {
 				_ = active.tun.Close()
 			}
@@ -345,28 +483,43 @@ func (m *Manager) forwardLoop(ctx context.Context, active *activeTunnel) {
 	go func() {
 		errs <- copyDeviceToTun(ctx, active.stream, active.tun)
 	}()
+	lost := false
 	for completed := 0; completed < 2; completed++ {
 		err := <-errs
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 			m.logf("Tunnel forwarding ended: %s", err)
+			if !lost {
+				lost = true
+				markLost(active)
+				active.cancel()
+			}
 		}
 	}
 	if ctx.Err() != nil {
-		m.logf("Tunnel forwarding stopped: %s", ctx.Err())
+		if lost {
+			m.logf("Tunnel forwarding ended")
+		} else {
+			m.logf("Tunnel forwarding stopped: %s", ctx.Err())
+		}
 		return
+	}
+	if !lost {
+		markLost(active)
 	}
 	m.logf("Tunnel forwarding ended")
 }
 
-func (m *Manager) dropActive(udid string) {
+func (m *Manager) dropActive(active *activeTunnel) {
 	m.mu.Lock()
-	active, ok := m.active[udid]
-	if ok && active.info.UDID == udid {
-		delete(m.active, udid)
+	current, ok := m.active[active.info.UDID]
+	removed := ok && current == active
+	if removed {
+		delete(m.active, active.info.UDID)
 	}
 	m.mu.Unlock()
-	if ok {
-		m.logf("Tunnel marked inactive: udid=%s", udid)
+	if removed {
+		markLost(active)
+		m.logf("Tunnel marked inactive: udid=%s", active.info.UDID)
 	}
 }
 

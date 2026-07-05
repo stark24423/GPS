@@ -30,6 +30,14 @@ type nativeSession struct {
 	rsdPort    int
 }
 
+type routeUpdate struct {
+	index         int
+	total         int
+	point         core.Coordinate
+	scheduledAt   time.Time
+	droppedBefore int
+}
+
 func New(manager *iostunnel.Manager) *Client {
 	return &Client{
 		Tunnel:   manager,
@@ -86,15 +94,23 @@ func (c *Client) PlayRoute(ctx context.Context, udid string, points []core.Coord
 
 func (c *Client) ClearLocation(ctx context.Context, udid string) error {
 	defer c.closeNativeSession(udid)
-	if info, ok := c.Tunnel.Info(udid); ok {
-		if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
-			c.logf("Location clear warning: RSD probe failed: %s", err)
+	info, err := c.Tunnel.EnsureRunning(ctx, udid)
+	if err != nil {
+		return err
+	}
+	if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
+		if err := locationCancellationError(ctx, err); err != nil {
 			return err
 		}
-		if err := c.runNativeClear(ctx, info); err != nil {
-			c.logf("Location clear warning: DVT clear failed: %s", err)
+		c.logf("Location clear RSD probe failed, rebuilding tunnel once: %s", err)
+		return c.retryClearLocationWithNewTunnel(ctx, udid, fmt.Errorf("RSD TCP probe failed before clear: %w", err))
+	}
+	if err := c.runNativeClear(ctx, info); err != nil {
+		if err := locationCancellationError(ctx, err); err != nil {
 			return err
 		}
+		c.logf("Location DVT clear failed, rebuilding tunnel once: %s", err)
+		return c.retryClearLocationWithNewTunnel(ctx, udid, err)
 	}
 	return nil
 }
@@ -187,6 +203,25 @@ func (c *Client) retryPlayRouteWithNewTunnel(ctx context.Context, udid string, p
 	return nil
 }
 
+func (c *Client) retryClearLocationWithNewTunnel(ctx context.Context, udid string, firstErr error) error {
+	if err := locationCancellationError(ctx, firstErr); err != nil {
+		return err
+	}
+	c.closeNativeSession(udid)
+	_ = c.Tunnel.Stop(udid)
+	info, err := c.Tunnel.EnsureRunning(ctx, udid)
+	if err != nil {
+		return fmt.Errorf("clear retry could not rebuild tunnel after first failure (%s): %w", summarizeError(firstErr), err)
+	}
+	if err := probeRSD(ctx, info.RSDAddress, info.RSDPort); err != nil {
+		return fmt.Errorf("clear retry RSD probe failed after first failure (%s): %w", summarizeError(firstErr), err)
+	}
+	if err := c.runNativeClear(ctx, info); err != nil {
+		return fmt.Errorf("clear retry DVT clear failed after first failure (%s): %w", summarizeError(firstErr), err)
+	}
+	return nil
+}
+
 func probeRSD(ctx context.Context, address string, port int) error {
 	dialer := &net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(address, fmt.Sprint(port)))
@@ -202,7 +237,34 @@ func (c *Client) runNativeLocation(ctx context.Context, info iostunnel.TunnelInf
 		return err
 	}
 	c.logf("Location DVT native: set %.8f, %.8f", point.Lat, point.Lon)
-	return client.SetLocation(ctx, point.Lat, point.Lon)
+	if err := c.setLocationWithTunnelWatch(ctx, info, client, point); err != nil {
+		c.closeNativeSession(info.UDID)
+		return err
+	}
+	return nil
+}
+
+func (c *Client) setLocationWithTunnelWatch(ctx context.Context, info iostunnel.TunnelInfo, client *dtx.Client, point core.Coordinate) error {
+	lost, _ := c.Tunnel.Lost(info)
+	setCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-lost:
+			cancel()
+		case <-setCtx.Done():
+		}
+	}()
+	err := client.SetLocation(setCtx, point.Lat, point.Lon)
+	select {
+	case <-lost:
+		if err == nil {
+			err = fmt.Errorf("tunnel lost before DVT set confirmation")
+		}
+		return fmt.Errorf("tunnel lost during DVT set: %w", err)
+	default:
+	}
+	return err
 }
 
 func (c *Client) runNativeClear(ctx context.Context, info iostunnel.TunnelInfo) error {
@@ -216,23 +278,133 @@ func (c *Client) runNativeClear(ctx context.Context, info iostunnel.TunnelInfo) 
 
 func (c *Client) runNativeRoute(ctx context.Context, info iostunnel.TunnelInfo, points []core.Coordinate, tick time.Duration) error {
 	if tick <= 0 {
-		tick = time.Second
+		tick = core.DefaultRouteTick
 	}
 	client, err := c.nativeSession(ctx, info)
 	if err != nil {
 		return err
 	}
-	c.logf("Location DVT native: play route points=%d tick=%s", len(points), tick)
+	c.logf("Location DVT native: play route points=%d tick=%s mode=latest-only", len(points), tick)
+
+	updates := make(chan routeUpdate, 1)
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- c.sendLatestRouteUpdates(ctx, client, updates, tick)
+	}()
+
+	scheduleErr := c.scheduleRouteUpdates(ctx, points, tick, updates)
+	close(updates)
+	workerErr := <-workerDone
+	if scheduleErr != nil {
+		return scheduleErr
+	}
+	return workerErr
+}
+
+func (c *Client) scheduleRouteUpdates(ctx context.Context, points []core.Coordinate, tick time.Duration, updates chan routeUpdate) error {
+	started := time.Now()
+	droppedBeforeNext := 0
 	for index, point := range points {
-		if err := client.SetLocation(ctx, point.Lat, point.Lon); err != nil {
-			return fmt.Errorf("send route point %d/%d: %w", index+1, len(points), err)
-		}
-		if index+1 < len(points) {
+		scheduledAt := started.Add(time.Duration(index) * tick)
+		if wait := time.Until(scheduledAt); wait > 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(tick):
+			case <-time.After(wait):
 			}
+		}
+
+		update := routeUpdate{
+			index:         index,
+			total:         len(points),
+			point:         point,
+			scheduledAt:   scheduledAt,
+			droppedBefore: droppedBeforeNext,
+		}
+		droppedBeforeNext = 0
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case updates <- update:
+		default:
+			select {
+			case old := <-updates:
+				droppedBeforeNext += old.droppedBefore + 1
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case updates <- routeUpdate{
+				index:         index,
+				total:         len(points),
+				point:         point,
+				scheduledAt:   scheduledAt,
+				droppedBefore: droppedBeforeNext,
+			}:
+				droppedBeforeNext = 0
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Client) sendLatestRouteUpdates(ctx context.Context, client *dtx.Client, updates <-chan routeUpdate, tick time.Duration) error {
+	sent := 0
+	for update := range updates {
+		latest := update
+		skipped := latest.droppedBefore
+		closed := false
+		for {
+			select {
+			case next, ok := <-updates:
+				if !ok {
+					closed = true
+					goto send
+				}
+				skipped += next.droppedBefore + 1
+				latest = next
+			default:
+				goto send
+			}
+		}
+
+	send:
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		sendStarted := time.Now()
+		if err := client.SetLocation(ctx, latest.point.Lat, latest.point.Lon); err != nil {
+			return fmt.Errorf("send route point %d/%d: %w", latest.index+1, latest.total, err)
+		}
+		sent++
+		rtt := time.Since(sendStarted)
+		lag := time.Since(latest.scheduledAt)
+		c.logf(
+			"Location DVT native: route send point=%d/%d sent=%d skipped=%d rtt=%s lag=%s tick=%s lat=%.8f lon=%.8f",
+			latest.index+1,
+			latest.total,
+			sent,
+			skipped,
+			rtt.Round(time.Millisecond),
+			lag.Round(time.Millisecond),
+			tick,
+			latest.point.Lat,
+			latest.point.Lon,
+		)
+		if rtt > tick {
+			c.logf(
+				"Location DVT native: route send slow point=%d/%d rtt=%s exceeds tick=%s",
+				latest.index+1,
+				latest.total,
+				rtt.Round(time.Millisecond),
+				tick,
+			)
+		}
+		if closed {
+			return nil
 		}
 	}
 	return nil

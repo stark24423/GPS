@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const EarthRadiusMeters = 6371000.0
+const (
+	EarthRadiusMeters = 6371000.0
+	DefaultRouteTick  = 250 * time.Millisecond
+)
 
 func HaversineDistanceMeters(start, end Coordinate) float64 {
 	lat1 := degreesToRadians(start.Lat)
@@ -101,7 +104,7 @@ func JitterCoordinate(point Coordinate, radiusMeters float64, rng *rand.Rand) Co
 
 	return Coordinate{
 		Lat:       point.Lat + latOffset,
-		Lon:       point.Lon + lonOffset,
+		Lon:       NormalizeLongitude(point.Lon + lonOffset),
 		Elevation: point.Elevation,
 	}
 }
@@ -137,7 +140,15 @@ func OffsetCoordinate(point Coordinate, eastMeters, northMeters float64) Coordin
 	latOffset := northMeters / 111320
 	lonScale := math.Max(0.01, math.Cos(degreesToRadians(point.Lat)))
 	lonOffset := eastMeters / (111320 * lonScale)
-	return Coordinate{Lat: point.Lat + latOffset, Lon: point.Lon + lonOffset, Elevation: point.Elevation}
+	return Coordinate{Lat: point.Lat + latOffset, Lon: NormalizeLongitude(point.Lon + lonOffset), Elevation: point.Elevation}
+}
+
+func NormalizeLongitude(lon float64) float64 {
+	lon = math.Mod(lon+180, 360)
+	if lon < 0 {
+		lon += 360
+	}
+	return lon - 180
 }
 
 func degreesToRadians(value float64) float64 {

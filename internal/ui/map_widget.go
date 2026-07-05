@@ -429,7 +429,7 @@ func latLonToWorld(lat, lon float64, zoom int) (float64, float64) {
 
 func worldToLatLon(x, y float64, zoom int) (float64, float64) {
 	scale := float64(tileSize * (int(1) << zoom))
-	lon := x/scale*360 - 180
+	lon := core.NormalizeLongitude(x/scale*360 - 180)
 	n := math.Pi - 2*math.Pi*y/scale
 	lat := 180 / math.Pi * math.Atan(0.5*(math.Exp(n)-math.Exp(-n)))
 	return lat, lon

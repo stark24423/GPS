@@ -38,11 +38,10 @@ func (a *Application) buildMapPanel() fyne.CanvasObject {
 func (a *Application) buildSimulationPanel() fyne.CanvasObject {
 	form := widget.NewForm(
 		widget.NewFormItem("Mode", a.modeSelect),
-		widget.NewFormItem("Bridge", a.bridgeSelect),
 		widget.NewFormItem("Route speed", valueSlider(a.speedSlider, a.speedLabel)),
 		widget.NewFormItem("Jitter", valueSlider(a.jitterSlider, a.jitterLabel)),
 	)
-	return widget.NewCard("Simulation", "Route and playback configuration", form)
+	return widget.NewCard("Simulation", "Route and playback configuration", container.NewVBox(form, a.routeSpeedSummary))
 }
 
 func (a *Application) buildManualMovementPanel() fyne.CanvasObject {

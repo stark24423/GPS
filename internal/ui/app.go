@@ -18,12 +18,11 @@ import (
 )
 
 const (
-	appVersion = "v0.1.2"
+	appVersion = "v0.1.6"
 
 	modeSingle = "Single point"
 	modeRoute  = "Route"
 
-	bridgeDryRun = "Dry-run"
 	bridgeIPhone = "iPhone"
 
 	inputActionResolve = "resolve"
@@ -41,12 +40,12 @@ type Application struct {
 	bridge  *iosbridge.Bridge
 
 	modeSelect    *widget.Select
-	bridgeSelect  *widget.Select
 	deviceSelect  *widget.Select
 	locationEntry *widget.Entry
 
 	speedSlider        *widget.Slider
 	speedLabel         *widget.Label
+	routeSpeedSummary  *widget.Label
 	jitterSlider       *widget.Slider
 	jitterLabel        *widget.Label
 	joystickSpeed      float64
@@ -67,6 +66,7 @@ type Application struct {
 	resolveButton   *widget.Button
 	setSingleButton *widget.Button
 	addRouteButton  *widget.Button
+	planRouteButton *widget.Button
 	applyNowButton  *widget.Button
 	saveRouteButton *widget.Button
 	loadRouteButton *widget.Button
@@ -75,6 +75,12 @@ type Application struct {
 	stateMu              sync.Mutex
 	points               []core.Coordinate
 	running              bool
+	operationID          string
+	operationCancel      context.CancelFunc
+	keepAliveID          string
+	keepAliveCancel      context.CancelFunc
+	keepAlivePoint       *core.Coordinate
+	previewID            string
 	previewCancel        context.CancelFunc
 	joystickCancel       context.CancelFunc
 	joystickStreamCancel context.CancelFunc
@@ -88,6 +94,7 @@ type Application struct {
 
 	tunnelStartInFlight atomic.Bool
 	resetInFlight       atomic.Bool
+	operationSeq        atomic.Uint64
 	outputDir           string
 	logFilePath         string
 }
@@ -121,7 +128,7 @@ func NewApplication() *Application {
 	a.stopButton.Disable()
 	a.refreshDevices()
 	a.logRequirements()
-	a.logf("Application started in dry-run mode.")
+	a.logf("Application started in iPhone mode.")
 
 	return a
 }
@@ -141,24 +148,17 @@ func (a *Application) buildControls() {
 		if value == modeSingle {
 			a.keepOnlyLastPoint()
 		}
+		a.updateRouteControls()
 	})
 	a.modeSelect.Selected = modeSingle
 
-	a.bridgeSelect = widget.NewSelect([]string{bridgeDryRun, bridgeIPhone}, func(value string) {
-		a.logf("Bridge mode changed to %s.", value)
-		a.refreshDevices()
-		a.logRequirements()
-	})
-	a.bridgeSelect.Selected = bridgeDryRun
-
 	a.deviceSelect = widget.NewSelect(nil, func(label string) {
 		if udid, ok := a.deviceChoices[label]; ok {
+			a.stopLocationKeepAlive()
+			a.stopPreview()
+			a.stopJoystick()
 			a.bridge.SetUDID(udid)
 			a.logf("Selected device: %s", label)
-			if a.bridgeSelect.Selected != bridgeIPhone {
-				a.bridgeSelect.SetSelected(bridgeIPhone)
-				return
-			}
 			a.startTunnelForSelected(false)
 		}
 	})
@@ -173,7 +173,10 @@ func (a *Application) buildControls() {
 	a.speedLabel = widget.NewLabel("19.0 km/h")
 	a.speedSlider.OnChanged = func(value float64) {
 		a.speedLabel.SetText(fmt.Sprintf("%.1f km/h", value))
+		a.refreshRouteSpeedSummary()
 	}
+	a.routeSpeedSummary = widget.NewLabel("")
+	a.routeSpeedSummary.Wrapping = fyne.TextWrapWord
 
 	a.jitterSlider = widget.NewSlider(0, 50)
 	a.jitterSlider.Step = 0.5
@@ -182,6 +185,7 @@ func (a *Application) buildControls() {
 	a.jitterSlider.OnChanged = func(value float64) {
 		a.jitterLabel.SetText(fmt.Sprintf("%.1f m", value))
 	}
+	a.updateRouteControls()
 
 	a.joystickSpeedLabel = widget.NewLabel("19.0 km/h")
 
@@ -199,6 +203,7 @@ func (a *Application) buildControls() {
 	a.addRouteButton = widget.NewButtonWithIcon("加入路線", theme.ContentAddIcon(), func() {
 		a.applyInputLocation(inputActionRoute)
 	})
+	a.planRouteButton = widget.NewButtonWithIcon("Plan A-B", theme.NavigateNextIcon(), a.planABRoute)
 	a.applyNowButton = widget.NewButtonWithIcon("立即修改定位", theme.ConfirmIcon(), func() {
 		a.applyInputLocation(inputActionSetNow)
 	})
@@ -209,6 +214,7 @@ func (a *Application) buildControls() {
 	a.resolveButton.SetText("搜尋")
 	a.setSingleButton.SetText("設為單點")
 	a.addRouteButton.SetText("加入路線")
+	a.planRouteButton.SetText("Plan A-B")
 	a.applyNowButton.SetText("立即修改定位")
 
 	a.logLabel = widget.NewLabel("")
