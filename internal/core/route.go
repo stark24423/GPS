@@ -12,6 +12,82 @@ const (
 	DefaultRouteTick  = 250 * time.Millisecond
 )
 
+type RouteProgress struct {
+	Point          Coordinate
+	TraveledMeters float64
+	TotalMeters    float64
+	Fraction       float64
+}
+
+type RouteWalker struct {
+	points          []Coordinate
+	segment         int
+	segmentProgress float64
+	traveled        float64
+	total           float64
+}
+
+func NewRouteWalker(points []Coordinate) (*RouteWalker, error) {
+	if len(points) == 0 {
+		return nil, errors.New("at least one coordinate is required")
+	}
+
+	copyOfPoints := append([]Coordinate(nil), points...)
+	total := 0.0
+	for i := 0; i < len(copyOfPoints)-1; i++ {
+		total += HaversineDistanceMeters(copyOfPoints[i], copyOfPoints[i+1])
+	}
+	return &RouteWalker{points: copyOfPoints, total: total}, nil
+}
+
+func (w *RouteWalker) Current() RouteProgress {
+	if len(w.points) == 1 || w.segment >= len(w.points)-1 || w.total == 0 {
+		return RouteProgress{Point: w.points[len(w.points)-1], TraveledMeters: w.total, TotalMeters: w.total, Fraction: 1}
+	}
+
+	start := w.points[w.segment]
+	end := w.points[w.segment+1]
+	segmentDistance := HaversineDistanceMeters(start, end)
+	ratio := 0.0
+	if segmentDistance > 0 {
+		ratio = math.Min(1, w.segmentProgress/segmentDistance)
+	}
+	return RouteProgress{
+		Point: Coordinate{
+			Lat:       start.Lat + (end.Lat-start.Lat)*ratio,
+			Lon:       start.Lon + (end.Lon-start.Lon)*ratio,
+			Elevation: start.Elevation + (end.Elevation-start.Elevation)*ratio,
+		},
+		TraveledMeters: w.traveled,
+		TotalMeters:    w.total,
+		Fraction:       math.Min(1, w.traveled/w.total),
+	}
+}
+
+func (w *RouteWalker) Advance(distanceMeters float64) (RouteProgress, bool) {
+	if distanceMeters < 0 {
+		distanceMeters = 0
+	}
+	remaining := distanceMeters
+	for w.segment < len(w.points)-1 {
+		segmentDistance := HaversineDistanceMeters(w.points[w.segment], w.points[w.segment+1])
+		leftInSegment := segmentDistance - w.segmentProgress
+		if leftInSegment > remaining {
+			w.segmentProgress += remaining
+			w.traveled = math.Min(w.total, w.traveled+remaining)
+			return w.Current(), false
+		}
+
+		remaining -= math.Max(0, leftInSegment)
+		w.traveled = math.Min(w.total, w.traveled+math.Max(0, leftInSegment))
+		w.segment++
+		w.segmentProgress = 0
+	}
+
+	w.traveled = w.total
+	return w.Current(), true
+}
+
 func HaversineDistanceMeters(start, end Coordinate) float64 {
 	lat1 := degreesToRadians(start.Lat)
 	lat2 := degreesToRadians(end.Lat)

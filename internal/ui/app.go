@@ -50,6 +50,7 @@ type Application struct {
 	jitterLabel        *widget.Label
 	joystickSpeed      float64
 	joystickSpeedLabel *widget.Label
+	routeSpeedKmh      float64
 
 	statusLabel  *widget.Label
 	pointsLabel  *widget.Label
@@ -170,10 +171,18 @@ func (a *Application) buildControls() {
 	a.speedSlider = widget.NewSlider(0.1, 300)
 	a.speedSlider.Step = 0.1
 	a.speedSlider.Value = 19
+	a.routeSpeedKmh = a.speedSlider.Value
 	a.speedLabel = widget.NewLabel("19.0 km/h")
 	a.speedSlider.OnChanged = func(value float64) {
+		a.stateMu.Lock()
+		a.routeSpeedKmh = value
+		running := a.running
+		a.stateMu.Unlock()
 		a.speedLabel.SetText(fmt.Sprintf("%.1f km/h", value))
 		a.refreshRouteSpeedSummary()
+		if running {
+			a.setStatus(fmt.Sprintf("Route running | speed %.1f km/h", value))
+		}
 	}
 	a.routeSpeedSummary = widget.NewLabel("")
 	a.routeSpeedSummary.Wrapping = fyne.TextWrapWord

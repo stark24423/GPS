@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Route speed can now be adjusted while route playback is running; movement continues smoothly from the current position.
+
 ## v0.1.6 - 2026-07-05
 
 ### Fixed

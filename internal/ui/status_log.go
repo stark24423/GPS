@@ -52,7 +52,12 @@ func (a *Application) setRunning(running bool) {
 		a.stopButton.Enable()
 		a.clearButton.Disable()
 		a.modeSelect.Disable()
-		a.speedSlider.Disable()
+		// 路線播放器會在每個 tick 讀取最新速度，因此執行中仍需允許調整。
+		if a.modeSelect.Selected == modeRoute {
+			a.speedSlider.Enable()
+		} else {
+			a.speedSlider.Disable()
+		}
 		a.jitterSlider.Disable()
 		a.mapView.SetEditingLocked(true)
 		a.setStatus("Running")

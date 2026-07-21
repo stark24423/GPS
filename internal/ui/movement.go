@@ -85,7 +85,7 @@ func (a *Application) start() {
 	a.stopLocationKeepAlive()
 	a.stopJoystick()
 	a.setRunning(true)
-	a.startIPhoneOperation(opID, started, points, simulationPoints)
+	a.startIPhoneOperation(opID, started, points)
 }
 
 func (a *Application) writeOperationGPX(opID string, timed []core.TimedPoint) (string, error) {
@@ -105,7 +105,7 @@ func (a *Application) writeOperationGPX(opID string, timed []core.TimedPoint) (s
 	return path, nil
 }
 
-func (a *Application) startIPhoneOperation(opID string, started time.Time, points, simulationPoints []core.Coordinate) {
+func (a *Application) startIPhoneOperation(opID string, started time.Time, points []core.Coordinate) {
 	if a.modeSelect.Selected == modeSingle {
 		point := points[0]
 		a.setStatus("Location: preparing")
@@ -122,18 +122,102 @@ func (a *Application) startIPhoneOperation(opID string, started time.Time, point
 	}
 
 	a.setStatus("Location: preparing route")
-	timeout := routePlaybackTimeout(len(simulationPoints), core.DefaultRouteTick)
-	a.logf("[%s] playing route on iPhone points=%d tick=%s timeout=%s", opID, len(simulationPoints), core.DefaultRouteTick, timeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	a.logf("[%s] playing adjustable-speed route on iPhone points=%d tick=%s", opID, len(points), core.DefaultRouteTick)
+	ctx, cancel := context.WithCancel(context.Background())
 	a.setOperationCancel(opID, cancel)
-	a.startRouteTracker(ctx, opID, simulationPoints, core.DefaultRouteTick)
+	a.mapView.SetFollowMode(true)
 	go func() {
 		defer cancel()
 		defer a.clearOperationCancel(opID)
 		defer a.stopPreview()
-		err := a.bridge.PlayRoute(ctx, simulationPoints, core.DefaultRouteTick)
-		a.finishIPhoneOperation(opID, started, "Play iPhone route", err, simulationPoints)
+		err := a.playAdjustableSpeedRoute(ctx, opID, points, core.DefaultRouteTick)
+		a.finishIPhoneOperation(opID, started, "Play iPhone route", err, points)
 	}()
+}
+
+func (a *Application) currentRouteSpeed() float64 {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	return a.routeSpeedKmh
+}
+
+func (a *Application) playAdjustableSpeedRoute(ctx context.Context, opID string, points []core.Coordinate, tick time.Duration) error {
+	walker, err := core.NewRouteWalker(points)
+	if err != nil {
+		return err
+	}
+	if tick <= 0 {
+		tick = core.DefaultRouteTick
+	}
+
+	updates := make(chan core.Coordinate, 1)
+	streamDone := make(chan error, 1)
+	go func() {
+		streamDone <- a.bridge.StreamLatestLocation(ctx, updates, tick)
+	}()
+
+	queueLatestCoordinate(updates, walker.Current().Point)
+	lastTick := time.Now()
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	closed := false
+	defer func() {
+		if !closed {
+			close(updates)
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-streamDone:
+			return err
+		case now := <-ticker.C:
+			elapsed := now.Sub(lastTick)
+			lastTick = now
+			speedKmh := a.currentRouteSpeed()
+			progress, done := walker.Advance(speedKmh * 1000 / 3600 * elapsed.Seconds())
+			queueLatestCoordinate(updates, progress.Point)
+			a.updateAdjustableRouteProgress(opID, progress, speedKmh, done)
+			if done {
+				close(updates)
+				closed = true
+				return <-streamDone
+			}
+		}
+	}
+}
+
+func queueLatestCoordinate(updates chan core.Coordinate, point core.Coordinate) {
+	select {
+	case updates <- point:
+		return
+	default:
+	}
+	select {
+	case <-updates:
+	default:
+	}
+	updates <- point
+}
+
+func (a *Application) updateAdjustableRouteProgress(opID string, progress core.RouteProgress, speedKmh float64, done bool) {
+	status := fmt.Sprintf("Route %.0f%%", progress.Fraction*100)
+	if done {
+		status = "Arrived"
+	}
+	fyne.Do(func() {
+		a.stateMu.Lock()
+		a.joystickPosition = &core.Coordinate{Lat: progress.Point.Lat, Lon: progress.Point.Lon, Elevation: progress.Point.Elevation}
+		a.stateMu.Unlock()
+		a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", progress.Point.Lat, progress.Point.Lon))
+		a.mapView.SetCurrentPosition(progress.Point, status)
+		a.setStatus(fmt.Sprintf("Route running | speed %.1f km/h | %.0f%%", speedKmh, progress.Fraction*100))
+	})
+	if done {
+		a.logf("[%s] adjustable-speed route reached final point", opID)
+	}
 }
 
 func routePlaybackTimeout(points int, tick time.Duration) time.Duration {

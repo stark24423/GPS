@@ -148,6 +148,14 @@ func (c *Client) StreamLatestLocation(ctx context.Context, udid string, updates 
 			return ctx.Err()
 		case point, ok := <-updates:
 			if !ok {
+				// 路線完成時 channel 可能剛好在下一個 tick 前關閉；先送出最後一點，
+				// 避免畫面顯示已抵達，但 iPhone 還停在倒數第二個位置。
+				if dirty {
+					if err := client.SetLocation(ctx, latest.Lat, latest.Lon); err != nil {
+						c.closeNativeSession(udid)
+						return fmt.Errorf("flush latest location: %w", err)
+					}
+				}
 				return nil
 			}
 			latest = point

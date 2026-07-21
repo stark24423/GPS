@@ -54,6 +54,31 @@ func TestBuildTimedPointsUsesSubsecondDefaultTick(t *testing.T) {
 	}
 }
 
+func TestRouteWalkerSupportsChangingStepDistance(t *testing.T) {
+	points := []Coordinate{{Lat: 25, Lon: 121}, {Lat: 25, Lon: 121.001}}
+	walker, err := NewRouteWalker(points)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, done := walker.Advance(1)
+	if done || first.TraveledMeters != 1 {
+		t.Fatalf("first advance = %+v, done=%v", first, done)
+	}
+	second, done := walker.Advance(4)
+	if done || second.TraveledMeters != 5 {
+		t.Fatalf("second advance = %+v, done=%v", second, done)
+	}
+	if second.Fraction <= first.Fraction {
+		t.Fatalf("progress did not increase: first=%f second=%f", first.Fraction, second.Fraction)
+	}
+
+	final, done := walker.Advance(1000)
+	if !done || final.Point != points[len(points)-1] || final.Fraction != 1 {
+		t.Fatalf("final advance = %+v, done=%v", final, done)
+	}
+}
+
 func TestRouteJitterKeepsEndpoints(t *testing.T) {
 	points := []Coordinate{{Lat: 25.033, Lon: 121.5654}, {Lat: 25.04, Lon: 121.57}}
 	route, err := BuildTimedRoute(points, 30, time.Unix(1700000000, 0).UTC(), time.Second)
