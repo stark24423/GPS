@@ -38,14 +38,14 @@ func (a *Application) planABRoute() {
 	points := a.selectedPoints()
 	if len(points) < 2 {
 		a.logf("[%s] route planning rejected: points=%d", opID, len(points))
-		dialog.ShowInformation("Missing A-B points", "Route mode needs at least two points before planning.", a.window)
+		dialog.ShowInformation("缺少起點與終點", "請先加入至少兩個定位點再規劃路線。", a.window)
 		return
 	}
 	start := points[0]
 	end := points[len(points)-1]
 
 	a.setLocationButtonsEnabled(false)
-	a.setStatus("Planning A-B route...")
+	a.setStatus("正在規劃 A–B 路線…")
 	a.logf("[%s] planning A-B route: %.6f, %.6f -> %.6f, %.6f", opID, start.Lat, start.Lon, end.Lat, end.Lon)
 
 	go func() {
@@ -55,13 +55,13 @@ func (a *Application) planABRoute() {
 		fyne.Do(func() {
 			a.setLocationButtonsEnabled(true)
 			if err != nil {
-				a.setStatus("Route planning failed")
+				a.setStatus("路線規劃失敗")
 				a.logf("[%s] route planning failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				dialog.ShowError(err, a.window)
 				return
 			}
 			a.applyLoadedRoute(route.Points)
-			a.setStatus("A-B route planned")
+			a.setStatus("A–B 路線已完成")
 			a.logf(
 				"[%s] A-B route planned after %s: %d points, %.1f km, %.0f min",
 				opID,

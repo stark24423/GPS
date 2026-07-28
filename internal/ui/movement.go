@@ -33,7 +33,7 @@ func (a *Application) start() {
 	if a.running {
 		a.stateMu.Unlock()
 		a.logf("[%s] ignored: simulation already active", opID)
-		dialog.ShowInformation("Simulation active", "Stop the current simulation before starting another one.", a.window)
+		dialog.ShowInformation("模擬正在執行", "請先停止目前的模擬再重新開始。", a.window)
 		return
 	}
 	a.stateMu.Unlock()
@@ -42,18 +42,18 @@ func (a *Application) start() {
 	a.logf("[%s] selected points=%d %s", opID, len(points), coordinateSummary(points))
 	if len(points) == 0 {
 		a.logf("[%s] rejected: missing location", opID)
-		dialog.ShowInformation("Missing location", "Click the map to add at least one point first.", a.window)
+		dialog.ShowInformation("缺少定位點", "請先點擊地圖或搜尋地址加入定位點。", a.window)
 		return
 	}
 	if a.modeSelect.Selected == modeRoute && len(points) < 2 {
 		a.logf("[%s] rejected: route mode requires at least two points", opID)
-		dialog.ShowInformation("Missing route", "Route mode requires at least two points.", a.window)
+		dialog.ShowInformation("缺少路線", "路線模擬至少需要兩個定位點。", a.window)
 		return
 	}
 	if a.bridge.UDID() == "" {
 		a.logf("[%s] rejected: no selected iPhone", opID)
-		a.setStatus("No iPhone detected")
-		dialog.ShowInformation("Missing iPhone", "Select an iPhone before changing location.", a.window)
+		a.setStatus("未偵測到 iPhone")
+		dialog.ShowInformation("尚未連接 iPhone", "請先選擇 iPhone 再套用定位。", a.window)
 		return
 	}
 
@@ -85,7 +85,9 @@ func (a *Application) start() {
 	a.stopLocationKeepAlive()
 	a.stopJoystick()
 	a.setRunning(true)
-	a.startIPhoneOperation(opID, started, points)
+	a.routeProgress.SetValue(0)
+	generation := a.locationGeneration.Add(1)
+	a.startIPhoneOperation(opID, generation, started, points)
 }
 
 func (a *Application) writeOperationGPX(opID string, timed []core.TimedPoint) (string, error) {
@@ -105,10 +107,10 @@ func (a *Application) writeOperationGPX(opID string, timed []core.TimedPoint) (s
 	return path, nil
 }
 
-func (a *Application) startIPhoneOperation(opID string, started time.Time, points []core.Coordinate) {
+func (a *Application) startIPhoneOperation(opID string, generation uint64, started time.Time, points []core.Coordinate) {
 	if a.modeSelect.Selected == modeSingle {
 		point := points[0]
-		a.setStatus("Location: preparing")
+		a.setStatus("正在準備套用定位…")
 		a.logf("[%s] sending single point to iPhone lat=%.6f lon=%.6f timeout=%s", opID, point.Lat, point.Lon, singleLocationTimeout)
 		ctx, cancel := context.WithTimeout(context.Background(), singleLocationTimeout)
 		a.setOperationCancel(opID, cancel)
@@ -116,12 +118,12 @@ func (a *Application) startIPhoneOperation(opID string, started time.Time, point
 			defer cancel()
 			defer a.clearOperationCancel(opID)
 			err := a.bridge.SetLocation(ctx, point)
-			a.finishIPhoneOperation(opID, started, "Set iPhone location", err, []core.Coordinate{point})
+			a.finishIPhoneOperation(opID, generation, started, "Set iPhone location", err, []core.Coordinate{point})
 		}()
 		return
 	}
 
-	a.setStatus("Location: preparing route")
+	a.setStatus("正在準備播放路線…")
 	a.logf("[%s] playing adjustable-speed route on iPhone points=%d tick=%s", opID, len(points), core.DefaultRouteTick)
 	ctx, cancel := context.WithCancel(context.Background())
 	a.setOperationCancel(opID, cancel)
@@ -131,7 +133,7 @@ func (a *Application) startIPhoneOperation(opID string, started time.Time, point
 		defer a.clearOperationCancel(opID)
 		defer a.stopPreview()
 		err := a.playAdjustableSpeedRoute(ctx, opID, points, core.DefaultRouteTick)
-		a.finishIPhoneOperation(opID, started, "Play iPhone route", err, points)
+		a.finishIPhoneOperation(opID, generation, started, "Play iPhone route", err, points)
 	}()
 }
 
@@ -211,9 +213,10 @@ func (a *Application) updateAdjustableRouteProgress(opID string, progress core.R
 		a.stateMu.Lock()
 		a.joystickPosition = &core.Coordinate{Lat: progress.Point.Lat, Lon: progress.Point.Lon, Elevation: progress.Point.Elevation}
 		a.stateMu.Unlock()
-		a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", progress.Point.Lat, progress.Point.Lon))
+		a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", progress.Point.Lat, progress.Point.Lon))
 		a.mapView.SetCurrentPosition(progress.Point, status)
-		a.setStatus(fmt.Sprintf("Route running | speed %.1f km/h | %.0f%%", speedKmh, progress.Fraction*100))
+		a.routeProgress.SetValue(progress.Fraction)
+		a.setStatus(fmt.Sprintf("路線播放中｜速度 %.1f km/h｜%.0f%%", speedKmh, progress.Fraction*100))
 	})
 	if done {
 		a.logf("[%s] adjustable-speed route reached final point", opID)
@@ -243,8 +246,12 @@ func coordinateSummary(points []core.Coordinate) string {
 	return fmt.Sprintf("[first=%.6f,%.6f last=%.6f,%.6f]", first.Lat, first.Lon, last.Lat, last.Lon)
 }
 
-func (a *Application) finishIPhoneOperation(opID string, started time.Time, name string, err error, confirmed []core.Coordinate) {
+func (a *Application) finishIPhoneOperation(opID string, generation uint64, started time.Time, name string, err error, confirmed []core.Coordinate) {
 	fyne.Do(func() {
+		if a.locationGeneration.Load() != generation {
+			a.logf("[%s] %s result ignored: a newer stop, reset, or location operation superseded it", opID, name)
+			return
+		}
 		if err == nil {
 			a.applyConfirmedIPhonePosition(confirmed)
 			a.setRunning(false)
@@ -260,7 +267,7 @@ func (a *Application) finishIPhoneOperation(opID string, started time.Time, name
 		a.setRunning(false)
 		if errorsIsCanceled(err) {
 			a.logf("[%s] %s: stopped: %s", opID, name, err)
-			a.setStatus("Stopped")
+			a.setStatus("已停止")
 			return
 		}
 		if iosbridge.IsLocationSimulationPending(err) {
@@ -276,7 +283,7 @@ func (a *Application) finishIPhoneOperation(opID string, started time.Time, name
 			return
 		}
 		a.logf("[%s] %s failed: %s", opID, name, err)
-		a.setStatus("iPhone error")
+		a.setStatus("iPhone 操作失敗")
 		a.logOperationDone(opID, started, err)
 		dialog.ShowError(fmt.Errorf("%s failed: %s\n\nFull log: %s", name, compactError(err), a.logFilePath), a.window)
 	})
@@ -290,7 +297,7 @@ func (a *Application) applyConfirmedIPhonePosition(points []core.Coordinate) {
 	a.stateMu.Lock()
 	a.joystickPosition = &core.Coordinate{Lat: last.Lat, Lon: last.Lon}
 	a.stateMu.Unlock()
-	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
+	a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", last.Lat, last.Lon))
 	status := "Confirmed"
 	if len(points) > 1 {
 		status = "Arrived"
@@ -300,9 +307,11 @@ func (a *Application) applyConfirmedIPhonePosition(points []core.Coordinate) {
 
 func (a *Application) startLocationKeepAlive(point core.Coordinate) {
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	a.stateMu.Lock()
 	previous := a.keepAliveCancel
 	a.keepAliveCancel = cancel
+	a.keepAliveDone = done
 	a.keepAlivePoint = &core.Coordinate{Lat: point.Lat, Lon: point.Lon}
 	a.stateMu.Unlock()
 	if previous != nil {
@@ -315,6 +324,7 @@ func (a *Application) startLocationKeepAlive(point core.Coordinate) {
 	a.stateMu.Unlock()
 	a.logf("[%s] location keepalive started interval=%s timeout=%s lat=%.6f lon=%.6f", keepID, locationKeepAliveEvery, locationKeepAliveSend, point.Lat, point.Lon)
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(locationKeepAliveEvery)
 		defer ticker.Stop()
 		defer a.clearLocationKeepAlive(keepID)
@@ -359,21 +369,25 @@ func (a *Application) clearLocationKeepAlive(keepID string) {
 	if a.keepAliveID == keepID {
 		a.keepAliveID = ""
 		a.keepAliveCancel = nil
+		a.keepAliveDone = nil
 		a.keepAlivePoint = nil
 	}
 	a.stateMu.Unlock()
 }
 
-func (a *Application) stopLocationKeepAlive() {
+func (a *Application) stopLocationKeepAlive() <-chan struct{} {
 	a.stateMu.Lock()
 	cancel := a.keepAliveCancel
+	done := a.keepAliveDone
 	a.keepAliveID = ""
 	a.keepAliveCancel = nil
+	a.keepAliveDone = nil
 	a.keepAlivePoint = nil
 	a.stateMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	return done
 }
 
 func (a *Application) updateLocationKeepAlive(point core.Coordinate) {
@@ -390,7 +404,7 @@ func (a *Application) stop() {
 	a.stopPreview()
 	a.mapView.SetFollowMode(false)
 	a.setRunning(false)
-	a.currentLabel.SetText("Current: stopped")
+	a.currentLabel.SetText("目前位置：已停止")
 	a.stateMu.Lock()
 	current := a.joystickPosition
 	a.stateMu.Unlock()
@@ -421,10 +435,10 @@ func (a *Application) resetLocation() {
 		a.logf("[%s] reset ignored: already in progress", opID)
 		return
 	}
-	a.stopLocationKeepAlive()
+	keepAliveDone := a.stopLocationKeepAlive()
 	a.cancelCurrentOperation()
 	a.stopPreview()
-	a.stopJoystick()
+	joystickDone := a.stopJoystick()
 	a.mapView.SetFollowMode(false)
 	a.setRunning(false)
 	a.startButton.Disable()
@@ -435,18 +449,30 @@ func (a *Application) resetLocation() {
 		a.startButton.Enable()
 		a.resetButton.Enable()
 		a.logf("[%s] reset rejected: no selected iPhone", opID)
-		dialog.ShowInformation("Missing iPhone", "Select an iPhone before resetting location.", a.window)
-		a.setStatus("No iPhone detected")
+		dialog.ShowInformation("尚未連接 iPhone", "請先選擇 iPhone 再還原定位。", a.window)
+		a.setStatus("未偵測到 iPhone")
 		return
 	}
 
-	a.setStatus("Resetting location...")
+	a.setStatus("正在還原真實定位…")
 	a.logf("[%s] resetting iPhone location: clearing simulated location", opID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	a.setOperationCancel(opID, cancel)
 	go func() {
 		defer cancel()
 		defer a.clearOperationCancel(opID)
+		if err := waitForLocationSenders(ctx, keepAliveDone, joystickDone); err != nil {
+			fyne.Do(func() {
+				a.resetInFlight.Store(false)
+				a.startButton.Enable()
+				a.resetButton.Enable()
+				a.logf("[%s] reset iPhone location failed while stopping old location senders: %s", opID, err)
+				a.setStatus("還原定位失敗")
+				a.logOperationDone(opID, started, err)
+				dialog.ShowError(err, a.window)
+			})
+			return
+		}
 		err := a.bridge.ClearLocation(ctx)
 		fyne.Do(func() {
 			a.resetInFlight.Store(false)
@@ -454,25 +480,40 @@ func (a *Application) resetLocation() {
 			a.resetButton.Enable()
 			if err != nil {
 				a.logf("[%s] reset iPhone location failed: %s", opID, err)
-				a.setStatus("Reset failed")
+				a.setStatus("還原定位失敗")
 				a.logOperationDone(opID, started, err)
 				dialog.ShowError(err, a.window)
 				return
 			}
 			a.clearCurrentLocationView()
 			a.refreshTunnelStatus()
-			a.logf("[%s] reset iPhone location: location cleared; tunnel kept running", opID)
-			a.setStatus("Location reset")
+			a.logf("[%s] reset iPhone location: simulation stopped; waiting for a fresh real-location update; tunnel kept running", opID)
+			a.setStatus("已停止模擬，等待真實定位")
 			a.logOperationDone(opID, started, nil)
 		})
 	}()
+}
+
+func waitForLocationSenders(ctx context.Context, senders ...<-chan struct{}) error {
+	for _, done := range senders {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (a *Application) clearCurrentLocationView() {
 	a.stateMu.Lock()
 	a.joystickPosition = nil
 	a.stateMu.Unlock()
-	a.currentLabel.SetText("Current: reset")
+	a.currentLabel.SetText("目前位置：等待真實定位")
+	a.routeProgress.SetValue(0)
 	a.mapView.ClearCurrentPosition()
 }
 
@@ -526,8 +567,9 @@ func (a *Application) startRouteTracker(parent context.Context, opID string, poi
 					status = "Arrived"
 				}
 				fyne.Do(func() {
-					a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", point.Lat, point.Lon))
+					a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", point.Lat, point.Lon))
 					a.mapView.SetCurrentPosition(point, status)
+					a.routeProgress.SetValue(float64(index+1) / float64(len(points)))
 				})
 				lastIndex = index
 			}
@@ -617,12 +659,14 @@ func (a *Application) startJoystick() {
 	}()
 }
 
-func (a *Application) stopJoystick() {
+func (a *Application) stopJoystick() <-chan struct{} {
 	a.stateMu.Lock()
 	cancel := a.joystickCancel
 	a.joystickCancel = nil
 	streamCancel := a.joystickStreamCancel
+	streamDone := a.joystickStreamDone
 	a.joystickStreamCancel = nil
+	a.joystickStreamDone = nil
 	a.joystickUpdates = nil
 	a.stateMu.Unlock()
 	if cancel != nil {
@@ -631,6 +675,7 @@ func (a *Application) stopJoystick() {
 	if streamCancel != nil {
 		streamCancel()
 	}
+	return streamDone
 }
 
 func (a *Application) joystickTick() {
@@ -653,7 +698,7 @@ func (a *Application) joystickTick() {
 	a.stateMu.Unlock()
 
 	fyne.Do(func() {
-		a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", next.Lat, next.Lon))
+		a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", next.Lat, next.Lon))
 		a.mapView.SetCurrentPosition(next, "Joystick")
 	})
 
@@ -713,7 +758,7 @@ func (a *Application) keyboardNudge(dx, dy float64) {
 	a.joystickPosition = &next
 	a.stateMu.Unlock()
 
-	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", next.Lat, next.Lon))
+	a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", next.Lat, next.Lon))
 	a.mapView.SetFollowMode(true)
 	a.mapView.SetCurrentPosition(next, "Keyboard")
 	a.setStatus("Keyboard movement")
@@ -756,17 +801,21 @@ func (a *Application) ensureJoystickLocationStream() chan core.Coordinate {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan core.Coordinate, 1)
+	done := make(chan struct{})
 	a.joystickStreamCancel = cancel
+	a.joystickStreamDone = done
 	a.joystickUpdates = updates
 	a.stateMu.Unlock()
 
 	go func() {
+		defer close(done)
 		err := a.bridge.StreamLatestLocation(ctx, updates, 250*time.Millisecond)
 		fyne.Do(func() {
 			a.stateMu.Lock()
 			if a.joystickUpdates == updates {
 				a.joystickUpdates = nil
 				a.joystickStreamCancel = nil
+				a.joystickStreamDone = nil
 			}
 			a.stateMu.Unlock()
 			if err != nil && !errorsIsCanceled(err) {

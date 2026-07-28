@@ -75,7 +75,8 @@ func (c *Client) SetLocation(ctx context.Context, latitude, longitude float64) e
 }
 
 func (c *Client) ClearLocation(ctx context.Context) error {
-	return c.dispatch(ctx, 1, "stopLocationSimulation", nil, false)
+	// 清除定位若不等裝置回覆，斷線或拒絕時 UI 會誤判為已還原。
+	return c.dispatch(ctx, 1, "stopLocationSimulation", nil, true)
 }
 
 func (c *Client) handshake(ctx context.Context) error {

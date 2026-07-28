@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	appVersion = "v0.1.6"
+	appVersion = "v0.1.8"
 
-	modeSingle = "Single point"
-	modeRoute  = "Route"
+	modeSingle = "單點定位"
+	modeRoute  = "路線模擬"
 
 	bridgeIPhone = "iPhone"
 
@@ -50,6 +50,7 @@ type Application struct {
 	jitterLabel        *widget.Label
 	joystickSpeed      float64
 	joystickSpeedLabel *widget.Label
+	routeProgress      *widget.ProgressBar
 	routeSpeedKmh      float64
 
 	statusLabel  *widget.Label
@@ -63,6 +64,7 @@ type Application struct {
 	stopButton      *widget.Button
 	resetButton     *widget.Button
 	clearButton     *widget.Button
+	undoButton      *widget.Button
 	refreshButton   *widget.Button
 	resolveButton   *widget.Button
 	setSingleButton *widget.Button
@@ -80,11 +82,13 @@ type Application struct {
 	operationCancel      context.CancelFunc
 	keepAliveID          string
 	keepAliveCancel      context.CancelFunc
+	keepAliveDone        chan struct{}
 	keepAlivePoint       *core.Coordinate
 	previewID            string
 	previewCancel        context.CancelFunc
 	joystickCancel       context.CancelFunc
 	joystickStreamCancel context.CancelFunc
+	joystickStreamDone   chan struct{}
 	joystickUpdates      chan core.Coordinate
 	joystickDX           float64
 	joystickDY           float64
@@ -96,6 +100,7 @@ type Application struct {
 	tunnelStartInFlight atomic.Bool
 	resetInFlight       atomic.Bool
 	operationSeq        atomic.Uint64
+	locationGeneration  atomic.Uint64
 	outputDir           string
 	logFilePath         string
 }
@@ -107,7 +112,7 @@ func Run() {
 
 func NewApplication() *Application {
 	fyneApp := app.NewWithID("gpssim.go")
-	window := fyneApp.NewWindow("GPS Simulator")
+	window := fyneApp.NewWindow("GPS Simulator " + appVersion)
 	window.Resize(fyne.NewSize(1280, 760))
 
 	root := resolveProjectRoot()
@@ -127,6 +132,7 @@ func NewApplication() *Application {
 	a.window.Canvas().SetOnTypedKey(a.onKeyboardMovement)
 	a.bridge.SetLogger(a.logf)
 	a.stopButton.Disable()
+	a.undoButton.Disable()
 	a.refreshDevices()
 	a.logRequirements()
 	a.logf("Application started in iPhone mode.")
@@ -135,20 +141,17 @@ func NewApplication() *Application {
 }
 
 func (a *Application) buildControls() {
-	a.statusLabel = widget.NewLabel("Idle")
+	a.statusLabel = widget.NewLabel("待命")
 	a.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
 	a.statusDot = canvas.NewCircle(statusIdleColor())
-	a.pointsLabel = widget.NewLabel("Points: 0")
-	a.currentLabel = widget.NewLabel("Current: -")
-	a.deviceLabel = widget.NewLabel("Device: no iPhone detected")
+	a.pointsLabel = widget.NewLabel("定位點：0")
+	a.currentLabel = widget.NewLabel("目前位置：—")
+	a.deviceLabel = widget.NewLabel("尚未偵測到 iPhone")
 	a.deviceLabel.Truncation = fyne.TextTruncateEllipsis
-	a.tunnelLabel = widget.NewLabel("Tunnel: built-in Go tunnel not started")
+	a.tunnelLabel = widget.NewLabel("連線：尚未建立")
 	a.tunnelLabel.Truncation = fyne.TextTruncateEllipsis
 
 	a.modeSelect = widget.NewSelect([]string{modeSingle, modeRoute}, func(value string) {
-		if value == modeSingle {
-			a.keepOnlyLastPoint()
-		}
 		a.updateRouteControls()
 	})
 	a.modeSelect.Selected = modeSingle
@@ -163,10 +166,11 @@ func (a *Application) buildControls() {
 			a.startTunnelForSelected(false)
 		}
 	})
-	a.deviceSelect.PlaceHolder = "Default device"
+	a.deviceSelect.PlaceHolder = "選擇 iPhone"
 
 	a.locationEntry = widget.NewEntry()
 	a.locationEntry.SetPlaceHolder("地址或 GPS 座標，例如 24.7808548, 121.0252718")
+	a.locationEntry.OnSubmitted = func(string) { a.resolveLocationFromInput() }
 
 	a.speedSlider = widget.NewSlider(0.1, 300)
 	a.speedSlider.Step = 0.1
@@ -181,11 +185,12 @@ func (a *Application) buildControls() {
 		a.speedLabel.SetText(fmt.Sprintf("%.1f km/h", value))
 		a.refreshRouteSpeedSummary()
 		if running {
-			a.setStatus(fmt.Sprintf("Route running | speed %.1f km/h", value))
+			a.setStatus(fmt.Sprintf("路線播放中｜速度 %.1f km/h", value))
 		}
 	}
 	a.routeSpeedSummary = widget.NewLabel("")
 	a.routeSpeedSummary.Wrapping = fyne.TextWrapWord
+	a.routeProgress = widget.NewProgressBar()
 
 	a.jitterSlider = widget.NewSlider(0, 50)
 	a.jitterSlider.Step = 0.5
@@ -198,13 +203,14 @@ func (a *Application) buildControls() {
 
 	a.joystickSpeedLabel = widget.NewLabel("19.0 km/h")
 
-	a.startButton = widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), a.start)
+	a.startButton = widget.NewButtonWithIcon("套用定位", theme.MediaPlayIcon(), a.start)
 	a.startButton.Importance = widget.HighImportance
-	a.stopButton = widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), a.stop)
+	a.stopButton = widget.NewButtonWithIcon("停止播放", theme.MediaStopIcon(), a.stop)
 	a.stopButton.Importance = widget.DangerImportance
-	a.resetButton = widget.NewButtonWithIcon("Reset", theme.ContentClearIcon(), a.resetLocation)
-	a.clearButton = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), a.clearPoints)
-	a.refreshButton = widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), a.refreshDevices)
+	a.resetButton = widget.NewButtonWithIcon("還原真實定位", theme.ContentClearIcon(), a.resetLocation)
+	a.clearButton = widget.NewButtonWithIcon("清除定位點", theme.DeleteIcon(), a.clearPoints)
+	a.undoButton = widget.NewButtonWithIcon("復原上一點", theme.ContentUndoIcon(), a.removeLastPoint)
+	a.refreshButton = widget.NewButtonWithIcon("重新掃描", theme.ViewRefreshIcon(), a.refreshDevices)
 	a.resolveButton = widget.NewButtonWithIcon("搜尋", theme.SearchIcon(), a.resolveLocationFromInput)
 	a.setSingleButton = widget.NewButtonWithIcon("設為單點", theme.RadioButtonIcon(), func() {
 		a.applyInputLocation(inputActionSingle)
@@ -212,7 +218,7 @@ func (a *Application) buildControls() {
 	a.addRouteButton = widget.NewButtonWithIcon("加入路線", theme.ContentAddIcon(), func() {
 		a.applyInputLocation(inputActionRoute)
 	})
-	a.planRouteButton = widget.NewButtonWithIcon("Plan A-B", theme.NavigateNextIcon(), a.planABRoute)
+	a.planRouteButton = widget.NewButtonWithIcon("規劃 A–B 路線", theme.NavigateNextIcon(), a.planABRoute)
 	a.applyNowButton = widget.NewButtonWithIcon("立即修改定位", theme.ConfirmIcon(), func() {
 		a.applyInputLocation(inputActionSetNow)
 	})
@@ -223,7 +229,7 @@ func (a *Application) buildControls() {
 	a.resolveButton.SetText("搜尋")
 	a.setSingleButton.SetText("設為單點")
 	a.addRouteButton.SetText("加入路線")
-	a.planRouteButton.SetText("Plan A-B")
+	a.planRouteButton.SetText("規劃 A–B 路線")
 	a.applyNowButton.SetText("立即修改定位")
 
 	a.logLabel = widget.NewLabel("")

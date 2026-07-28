@@ -3,33 +3,34 @@ package ui
 import (
 	"context"
 	"fmt"
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/dialog"
 	"strings"
 	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/dialog"
 )
 
 func (a *Application) refreshDevices() {
 	opID := a.nextOperationID("dev")
 	started := time.Now()
 	a.refreshButton.Disable()
-	a.deviceLabel.SetText("Device: scanning...")
-	a.setStatus("Scanning iPhone...")
+	a.deviceLabel.SetText("正在掃描 iPhone…")
+	a.setStatus("正在掃描 iPhone…")
 	a.logf("[%s] device scan started", opID)
 	go func() {
 		devices, err := a.bridge.ListDevices()
 		fyne.Do(func() {
 			a.refreshButton.Enable()
 			if err != nil {
-				a.deviceLabel.SetText("Device: scan failed")
-				a.setStatus("Device scan failed")
+				a.deviceLabel.SetText("iPhone 掃描失敗")
+				a.setStatus("裝置掃描失敗")
 				a.logf("[%s] iPhone scan failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				return
 			}
 			if len(devices) == 0 {
-				a.deviceLabel.SetText("Device: no iPhone detected")
-				a.tunnelLabel.SetText("Tunnel: no selected iPhone")
-				a.setStatus("No iPhone detected")
+				a.deviceLabel.SetText("尚未偵測到 iPhone")
+				a.tunnelLabel.SetText("連線：未選擇 iPhone")
+				a.setStatus("未偵測到 iPhone")
 				a.stopLocationKeepAlive()
 				a.stopPreview()
 				a.stopJoystick()
@@ -61,10 +62,10 @@ func (a *Application) refreshDevices() {
 			a.deviceSelect.Selected = selected
 			a.bridge.SetUDID(a.deviceChoices[selected])
 			a.deviceSelect.Refresh()
-			a.deviceLabel.SetText("Device: " + strings.Join(labels, ", "))
+			a.deviceLabel.SetText("已連接：" + strings.Join(labels, ", "))
 			a.refreshTunnelStatus()
 			a.logf("[%s] detected device(s) after %s: %s", opID, time.Since(started).Round(time.Millisecond), strings.Join(labels, ", "))
-			a.setStatus("iPhone ready")
+			a.setStatus("iPhone 已就緒")
 			a.startTunnelForSelected(false)
 		})
 	}()
@@ -108,8 +109,8 @@ func (a *Application) startTunnelForSelected(showDialog bool) {
 	if showDialog {
 		a.openLogWindow()
 	}
-	a.tunnelLabel.SetText("Tunnel: starting...")
-	a.setStatus("Starting tunnel...")
+	a.tunnelLabel.SetText("連線：正在建立…")
+	a.setStatus("正在連接 iPhone…")
 	a.logf("[%s] starting built-in Go tunnel for selected iPhone", opID)
 
 	go func() {
@@ -119,16 +120,16 @@ func (a *Application) startTunnelForSelected(showDialog bool) {
 		fyne.Do(func() {
 			a.tunnelStartInFlight.Store(false)
 			if err != nil {
-				a.tunnelLabel.SetText("Tunnel: " + err.Error())
-				a.setStatus("Tunnel error")
+				a.tunnelLabel.SetText("連線失敗：" + compactError(err))
+				a.setStatus("iPhone 連線錯誤")
 				a.logf("[%s] start tunnel failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				if showDialog {
 					dialog.ShowError(err, a.window)
 				}
 				return
 			}
-			a.tunnelLabel.SetText(fmt.Sprintf("Tunnel: %s %s:%d", info.State, info.RSDAddress, info.RSDPort))
-			a.setStatus("Tunnel ready")
+			a.tunnelLabel.SetText(fmt.Sprintf("連線：已就緒（%s）", info.InterfaceName))
+			a.setStatus("iPhone 連線已就緒")
 			a.logf("Tunnel discovery result: udid=%s interface=%s state=%s rsd=%s:%d mtu=%d message=%s",
 				info.UDID,
 				info.InterfaceName,
@@ -168,9 +169,10 @@ func (a *Application) stopTunnel() {
 				dialog.ShowError(err, a.window)
 				return
 			}
-			a.tunnelLabel.SetText("Tunnel: stopped")
-			a.setStatus("Tunnel stopped")
+			a.tunnelLabel.SetText("連線：已停止")
+			a.setStatus("iPhone 連線已停止")
 			a.logf("[%s] tunnel stopped after %s", opID, time.Since(started).Round(time.Millisecond))
+
 		})
 	}()
 }
@@ -182,7 +184,7 @@ func (a *Application) refreshTunnelStatus() {
 		return
 	}
 	info := status[0]
-	a.tunnelLabel.SetText(fmt.Sprintf("Tunnel: %s %s:%d", info.State, info.RSDAddress, info.RSDPort))
+	a.tunnelLabel.SetText(fmt.Sprintf("連線：已就緒（%s）", info.InterfaceName))
 }
 
 func (a *Application) logRequirements() {

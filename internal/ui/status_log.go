@@ -60,7 +60,7 @@ func (a *Application) setRunning(running bool) {
 		}
 		a.jitterSlider.Disable()
 		a.mapView.SetEditingLocked(true)
-		a.setStatus("Running")
+		a.setStatus("執行中")
 		return
 	}
 
@@ -70,7 +70,7 @@ func (a *Application) setRunning(running bool) {
 	a.modeSelect.Enable()
 	a.updateRouteControls()
 	a.mapView.SetEditingLocked(false)
-	a.setStatus("Idle")
+	a.setStatus("待命")
 }
 
 func (a *Application) setStatus(status string) {
@@ -84,17 +84,17 @@ func (a *Application) setStatus(status string) {
 func statusColor(status string) color.Color {
 	normalized := strings.ToLower(status)
 	switch {
-	case strings.Contains(normalized, "error"), strings.Contains(normalized, "failed"):
+	case strings.Contains(normalized, "error"), strings.Contains(normalized, "failed"), strings.Contains(status, "失敗"), strings.Contains(status, "錯誤"):
 		return color.NRGBA{R: 220, G: 38, B: 38, A: 255}
 	case strings.Contains(normalized, "starting"), strings.Contains(normalized, "scanning"), strings.Contains(normalized, "running"), strings.Contains(normalized, "active"),
 		strings.Contains(normalized, "checking"), strings.Contains(normalized, "finding"), strings.Contains(normalized, "opening"),
 		strings.Contains(normalized, "creating"), strings.Contains(normalized, "waiting"), strings.Contains(normalized, "connecting"),
-		strings.Contains(normalized, "sending"), strings.Contains(normalized, "discovering"), strings.Contains(normalized, "probing"):
+		strings.Contains(normalized, "sending"), strings.Contains(normalized, "discovering"), strings.Contains(normalized, "probing"), strings.Contains(status, "正在"), strings.Contains(status, "執行中"):
 		return color.NRGBA{R: 37, G: 99, B: 235, A: 255}
 	case strings.Contains(normalized, "warn"), strings.Contains(normalized, "pending"), strings.Contains(normalized, "no iphone"), strings.Contains(normalized, "stopped"),
-		strings.Contains(normalized, "retry"), strings.Contains(normalized, "rebuilding"), strings.Contains(normalized, "slow"):
+		strings.Contains(normalized, "retry"), strings.Contains(normalized, "rebuilding"), strings.Contains(normalized, "slow"), strings.Contains(status, "未偵測"), strings.Contains(status, "已停止"):
 		return color.NRGBA{R: 217, G: 119, B: 6, A: 255}
-	case strings.Contains(normalized, "ready"), strings.Contains(normalized, "ok"), strings.Contains(normalized, "arrived"):
+	case strings.Contains(normalized, "ready"), strings.Contains(normalized, "ok"), strings.Contains(normalized, "arrived"), strings.Contains(status, "已就緒"), strings.Contains(status, "已完成"), strings.Contains(status, "已還原"):
 		return color.NRGBA{R: 22, G: 163, B: 74, A: 255}
 	default:
 		return statusIdleColor()
@@ -154,6 +154,9 @@ func (a *Application) clearOperationCancel(opID string) {
 }
 
 func (a *Application) cancelCurrentOperation() {
+	// 即使背景 DVT 呼叫已完成，它的 UI 回呼仍可能尚未執行。
+	// 先推進世代，避免舊回呼在停止或還原後重新啟動 keepalive。
+	a.locationGeneration.Add(1)
 	a.stateMu.Lock()
 	cancel := a.operationCancel
 	opID := a.operationID
@@ -278,14 +281,14 @@ func rotateLogFile(path string, maxBytes int64, backups int) error {
 
 func (a *Application) openLogWindow() {
 	if a.logWin == nil {
-		a.logWin = a.app.NewWindow("GPS Simulator Logs")
+		a.logWin = a.app.NewWindow("GPS Simulator 診斷紀錄")
 		a.logWin.Resize(fyne.NewSize(760, 460))
 		a.logWin.SetCloseIntercept(func() {
 			a.logWin.Hide()
 		})
 		logBox := container.NewVScroll(a.logLabel)
 		logBox.SetMinSize(fyne.NewSize(740, 420))
-		clearButton := widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), func() {
+		clearButton := widget.NewButtonWithIcon("清除畫面", theme.DeleteIcon(), func() {
 			a.logMu.Lock()
 			defer a.logMu.Unlock()
 			a.logLines = nil

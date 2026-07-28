@@ -19,7 +19,11 @@ import (
 )
 
 func (a *Application) resolveLocationFromInput() {
-	a.applyInputLocation(inputActionResolve)
+	if a.modeSelect.Selected == modeRoute {
+		a.applyInputLocation(inputActionRoute)
+		return
+	}
+	a.applyInputLocation(inputActionSingle)
 }
 
 func (a *Application) applyInputLocation(action string) {
@@ -34,13 +38,13 @@ func (a *Application) applyInputLocation(action string) {
 	}
 
 	a.setLocationButtonsEnabled(false)
-	a.setStatus("Resolving location...")
+	a.setStatus("正在搜尋位置…")
 	go func() {
 		point, label, err := resolveLocation(query)
 		fyne.Do(func() {
 			a.setLocationButtonsEnabled(true)
 			if err != nil {
-				a.setStatus("Location lookup failed")
+				a.setStatus("位置搜尋失敗")
 				a.logf("[%s] location lookup failed after %s: %s", opID, time.Since(started).Round(time.Millisecond), err)
 				dialog.ShowError(err, a.window)
 				return
@@ -56,7 +60,7 @@ func (a *Application) applyResolvedLocation(action string, point core.Coordinate
 	case inputActionRoute:
 		a.modeSelect.SetSelected(modeRoute)
 		a.addPoint(point)
-		a.setStatus("Route point added")
+		a.setStatus("已加入路線定位點")
 	case inputActionSetNow:
 		a.modeSelect.SetSelected(modeSingle)
 		a.addPoint(point)
@@ -64,7 +68,7 @@ func (a *Application) applyResolvedLocation(action string, point core.Coordinate
 	case inputActionSingle, inputActionResolve:
 		a.modeSelect.SetSelected(modeSingle)
 		a.addPoint(point)
-		a.setStatus("Location ready")
+		a.setStatus("位置已就緒")
 	}
 	a.mapView.CenterOn(point)
 	a.locationEntry.SetText(label)
@@ -93,10 +97,11 @@ func (a *Application) addPoint(point core.Coordinate) {
 	points := append([]core.Coordinate(nil), a.points...)
 	a.stateMu.Unlock()
 
-	a.pointsLabel.SetText(fmt.Sprintf("Points: %d", len(points)))
-	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", point.Lat, point.Lon))
+	a.pointsLabel.SetText(fmt.Sprintf("定位點：%d", len(points)))
+	a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", point.Lat, point.Lon))
 	a.mapView.SetPoints(points)
 	a.mapView.SetCurrentPosition(point, "Selected")
+	a.undoButton.Enable()
 	a.refreshRouteSpeedSummary()
 	a.logf("Added point: %.6f, %.6f", point.Lat, point.Lon)
 }
@@ -109,13 +114,15 @@ func (a *Application) clearPoints() {
 	a.joystickPosition = nil
 	a.stateMu.Unlock()
 
-	a.pointsLabel.SetText("Points: 0")
-	a.currentLabel.SetText("Current: -")
+	a.pointsLabel.SetText("定位點：0")
+	a.currentLabel.SetText("目前位置：—")
+	a.routeProgress.SetValue(0)
 	a.mapView.SetFollowMode(false)
 	a.mapView.ClearPoints()
 	a.mapView.ClearCurrentPosition()
+	a.undoButton.Disable()
 	a.refreshRouteSpeedSummary()
-	a.setStatus("Idle")
+	a.setStatus("待命")
 	a.logf("Cleared points.")
 }
 
@@ -128,17 +135,24 @@ func (a *Application) removeLastPoint() {
 	removed := a.points[len(a.points)-1]
 	a.points = a.points[:len(a.points)-1]
 	points := append([]core.Coordinate(nil), a.points...)
+	if len(points) > 0 {
+		last := points[len(points)-1]
+		a.joystickPosition = &core.Coordinate{Lat: last.Lat, Lon: last.Lon}
+	} else {
+		a.joystickPosition = nil
+	}
 	a.stateMu.Unlock()
 
-	a.pointsLabel.SetText(fmt.Sprintf("Points: %d", len(points)))
+	a.pointsLabel.SetText(fmt.Sprintf("定位點：%d", len(points)))
 	a.mapView.SetPoints(points)
 	if len(points) > 0 {
 		point := points[len(points)-1]
-		a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", point.Lat, point.Lon))
+		a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", point.Lat, point.Lon))
 		a.mapView.SetCurrentPosition(point, "Selected")
 	} else {
-		a.currentLabel.SetText("Current: -")
+		a.currentLabel.SetText("目前位置：—")
 		a.mapView.ClearCurrentPosition()
+		a.undoButton.Disable()
 	}
 	a.refreshRouteSpeedSummary()
 	a.logf("Removed point: %.6f, %.6f", removed.Lat, removed.Lon)
@@ -201,7 +215,7 @@ func (a *Application) loadRouteTXT() {
 		}
 		a.applyLoadedRoute(points)
 		a.logf("Route TXT loaded: %s", reader.URI().String())
-		a.setStatus("Route loaded")
+		a.setStatus("路線已載入")
 	}, a.window)
 	openDialog.SetFilter(storage.NewExtensionFileFilter([]string{".txt"}))
 	openDialog.Show()
@@ -221,12 +235,13 @@ func (a *Application) applyLoadedRoute(points []core.Coordinate) {
 	} else {
 		a.modeSelect.SetSelected(modeSingle)
 	}
-	a.pointsLabel.SetText(fmt.Sprintf("Points: %d", len(points)))
-	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
+	a.pointsLabel.SetText(fmt.Sprintf("定位點：%d", len(points)))
+	a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", last.Lat, last.Lon))
 	a.mapView.SetFollowMode(false)
 	a.mapView.SetPoints(points)
 	a.mapView.SetCurrentPosition(last, "Loaded")
 	a.mapView.CenterOn(last)
+	a.undoButton.Enable()
 	a.refreshRouteSpeedSummary()
 }
 
@@ -239,8 +254,8 @@ func (a *Application) keepOnlyLastPoint() {
 	last := a.points[len(a.points)-1]
 	a.points = []core.Coordinate{last}
 	a.stateMu.Unlock()
-	a.pointsLabel.SetText("Points: 1")
-	a.currentLabel.SetText(fmt.Sprintf("Current: %.6f, %.6f", last.Lat, last.Lon))
+	a.pointsLabel.SetText("定位點：1")
+	a.currentLabel.SetText(fmt.Sprintf("目前位置：%.6f, %.6f", last.Lat, last.Lon))
 	a.mapView.SetPoints([]core.Coordinate{last})
 	a.mapView.SetCurrentPosition(last, "Selected")
 	a.refreshRouteSpeedSummary()
@@ -269,9 +284,15 @@ func (a *Application) updateRouteControls() {
 		return
 	}
 	if a.modeSelect.Selected == modeRoute {
+		if a.startButton != nil {
+			a.startButton.SetText("播放路線")
+		}
 		a.speedSlider.Enable()
 		a.jitterSlider.Enable()
 	} else {
+		if a.startButton != nil {
+			a.startButton.SetText("套用定位")
+		}
 		a.speedSlider.Disable()
 		a.jitterSlider.Disable()
 	}
@@ -284,17 +305,17 @@ func (a *Application) refreshRouteSpeedSummary() {
 	}
 	points := a.selectedPoints()
 	if a.modeSelect == nil || a.modeSelect.Selected != modeRoute {
-		a.routeSpeedSummary.SetText("Route speed applies when Route mode is selected.")
+		a.routeSpeedSummary.SetText("切換到路線模擬後可設定速度與 GPS 漂移。")
 		return
 	}
 	if len(points) < 2 {
-		a.routeSpeedSummary.SetText("Add at least two route points to estimate playback time.")
+		a.routeSpeedSummary.SetText("請加入至少兩個定位點以估算播放時間。")
 		return
 	}
 	distanceMeters := routeDistanceMeters(points)
 	speedKmh := a.speedSlider.Value
 	duration := estimatedRouteDuration(distanceMeters, speedKmh)
-	a.routeSpeedSummary.SetText(fmt.Sprintf("Route %.2f km at %.1f km/h: about %s", distanceMeters/1000, speedKmh, compactDuration(duration)))
+	a.routeSpeedSummary.SetText(fmt.Sprintf("路線 %.2f 公里｜%.1f km/h｜預估 %s", distanceMeters/1000, speedKmh, compactDuration(duration)))
 }
 
 func routeDistanceMeters(points []core.Coordinate) float64 {

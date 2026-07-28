@@ -14,6 +14,7 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.ZoomInIcon(), a.mapView.ZoomIn),
 		widget.NewToolbarAction(theme.ZoomOutIcon(), a.mapView.ZoomOut),
 		widget.NewToolbarSeparator(),
+		widget.NewToolbarAction(theme.ContentUndoIcon(), a.removeLastPoint),
 		widget.NewToolbarAction(theme.ZoomFitIcon(), func() {
 			a.stateMu.Lock()
 			current := a.joystickPosition
@@ -45,12 +46,13 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 		container.NewGridWrap(fyne.NewSize(260, a.deviceSelect.MinSize().Height), a.deviceSelect),
 		a.refreshButton,
 	)
-	headerRoute := container.NewHBox(a.saveRouteButton, a.loadRouteButton, a.clearButton)
+	headerRoute := container.NewHBox(a.saveRouteButton, a.loadRouteButton, a.undoButton, a.clearButton)
+	deviceStatus := container.NewVBox(a.deviceLabel, a.tunnelLabel)
 	appHeader := container.NewVBox(
 		container.NewPadded(container.NewBorder(nil, nil,
 			headerDevice,
 			headerRoute,
-			nil,
+			deviceStatus,
 		)),
 		widget.NewSeparator(),
 	)
@@ -60,15 +62,31 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 			widget.NewFormItem("模式", a.modeSelect),
 		),
 		a.locationEntry,
-		buttonGrid(3, a.resolveButton, a.setSingleButton, a.addRouteButton),
-		buttonGrid(2, a.planRouteButton, a.applyNowButton),
+		buttonGrid(2, a.resolveButton, a.planRouteButton),
 	))
+
+	speedPreset := widget.NewSelect([]string{"步行 5 km/h", "單車 15 km/h", "市區 50 km/h", "高速 100 km/h"}, func(value string) {
+		switch value {
+		case "步行 5 km/h":
+			a.speedSlider.SetValue(5)
+		case "單車 15 km/h":
+			a.speedSlider.SetValue(15)
+		case "市區 50 km/h":
+			a.speedSlider.SetValue(50)
+		case "高速 100 km/h":
+			a.speedSlider.SetValue(100)
+		}
+	})
+	speedPreset.PlaceHolder = "常用速度"
 
 	moveSection := compactSection("移動", container.NewVBox(
 		labeledSlider("路線速度", a.speedSlider, a.speedLabel),
+		speedPreset,
 		labeledSlider("飄移", a.jitterSlider, a.jitterLabel),
 		a.routeSpeedSummary,
-		buttonGrid(3, a.startButton, a.stopButton, a.resetButton),
+		a.routeProgress,
+		buttonGrid(2, a.startButton, a.stopButton),
+		container.NewPadded(a.resetButton),
 	))
 
 	joystickHint := widget.NewLabel("方向鍵 / WASD")
@@ -78,7 +96,7 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 		joystick.Reset()
 		a.stopJoystick()
 		a.mapView.SetFollowMode(false)
-		a.setStatus("Joystick paused")
+		a.setStatus("搖桿已暫停")
 	})
 	joystickSection := compactSection("搖桿", container.NewBorder(nil, nil,
 		container.NewCenter(container.NewGridWrap(fyne.NewSize(112, 112), joystick)),
@@ -102,12 +120,10 @@ func (a *Application) buildLayout() fyne.CanvasObject {
 	statusRow := container.NewHBox(statusDotCell(a.statusDot, a.statusLabel), a.statusLabel)
 	footer := container.NewVBox(
 		widget.NewSeparator(),
-		container.NewPadded(container.NewGridWithColumns(5,
+		container.NewPadded(container.NewGridWithColumns(3,
 			infoPill("狀態", statusRow),
 			infoValue(a.pointsLabel),
 			infoValue(a.currentLabel),
-			infoValue(a.tunnelLabel),
-			infoPill("版本", widget.NewLabel(appVersion)),
 		)),
 	)
 
